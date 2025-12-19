@@ -5,13 +5,13 @@ const { Expo } = require('expo-server-sdk');
 const crypto = require('crypto');
 const Redis = require('ioredis');
 const { redisOptions } = require('../config/redis');
-const redis = new Redis(redisOptions);
 
-// 🔥 НОВЫЙ ИМПОРТ (Каскадная загрузка)
+// 🔥 FIX: Безопасное подключение. Если настроек нет — redis будет null.
+const redis = redisOptions ? new Redis(redisOptions) : null;
+
+// Импорты сервисов
 const VideoManager = require('../services/video/VideoManager');
-// Старый импорт (processVideoSmartly) удален, оставили только cleanupFile если он нужен
-const { cleanupFile } = require('../services/videoProcessor'); 
-
+const { cleanupFile } = require('../services/videoProcessor');
 const { transcribeAudio, verifyClaim, analyzeContentType } = require('../services/aiService');
 const ClaimExtractor = require('../services/claimExtractor');
 
@@ -44,12 +44,15 @@ async function processVerification(job) {
     // ---------------------------------------------------------
     // УРОВЕНЬ 1: REDIS (Мгновенная память - RAM)
     // ---------------------------------------------------------
-    const cachedRedis = await redis.get(cacheKey);
-    if (cachedRedis) {
-        console.log('[Worker] ⚡ REDIS HIT (Fastest)');
-        const res = JSON.parse(cachedRedis);
-        await sendPush(pushToken, res.verdict, res.dbId);
-        return res;
+    // 🔥 FIX: Проверяем, есть ли Redis перед чтением
+    if (redis) {
+        const cachedRedis = await redis.get(cacheKey);
+        if (cachedRedis) {
+            console.log('[Worker] ⚡ REDIS HIT (Fastest)');
+            const res = JSON.parse(cachedRedis);
+            await sendPush(pushToken, res.verdict, res.dbId);
+            return res;
+        }
     }
 
     // ---------------------------------------------------------
@@ -62,7 +65,6 @@ async function processVerification(job) {
 
     if (existingCheck) {
         console.log('[Worker] 📚 DB HIT (Historical Data)');
-        
         const dbResult = {
             verdict: existingCheck.verdict,
             confidence: existingCheck.confidence,
@@ -72,8 +74,12 @@ async function processVerification(job) {
             sources: existingCheck.sources ? JSON.parse(existingCheck.sources) : [],
             dbId: existingCheck.id
         };
-
-        await redis.set(cacheKey, JSON.stringify(dbResult), 'EX', CACHE_TTL);
+        
+        // 🔥 FIX: Пишем в кэш только если Redis доступен
+        if (redis) {
+            await redis.set(cacheKey, JSON.stringify(dbResult), 'EX', CACHE_TTL);
+        }
+        
         await sendPush(pushToken, dbResult.verdict, existingCheck.id);
         return dbResult;
     }
@@ -83,10 +89,9 @@ async function processVerification(job) {
     // ---------------------------------------------------------
     let analysisText = content;
 
-    // 1. Получение текста (Через VideoManager!)
+    // 1. Получение текста
     if (type === 'video') {
        try {
-           // 🔥 ИСПОЛЬЗУЕМ КАСКАДНУЮ ЗАГРУЗКУ
            console.log('[Worker] 🎬 Starting VideoManager...');
            const result = await VideoManager.process(content);
            
@@ -99,9 +104,7 @@ async function processVerification(job) {
                analysisText = await transcribeAudio(audioFile);
            }
            
-           // Запоминаем функцию очистки от провайдера (если есть)
            if (result.cleanup) cleanupCallback = result.cleanup;
-
        } catch (err) {
            console.error('[Worker] Video processing died:', err.message);
            throw new Error("Не удалось скачать видео. Возможно, приватный доступ или блокировка.");
@@ -133,7 +136,6 @@ async function processVerification(job) {
         }
     } else {
         console.log('[Worker] ✅ Facts detected. Verifying...');
-        
         const extraction = ClaimExtractor.extract(analysisText);
         const promptText = (extraction && extraction.confidence > 0.4) ? extraction.bestClaim : analysisText;
         
@@ -151,7 +153,7 @@ async function processVerification(job) {
     
     const startTime = timestamp || Date.now();
     const duration = Date.now() - startTime;
-
+    
     const savedCheck = await prisma.check.create({
         data: {
             userId: "anon",
@@ -166,12 +168,14 @@ async function processVerification(job) {
             sources: JSON.stringify(result.sources || []) 
         }
     });
-
     result.dbId = savedCheck.id;
 
     // 4. Кэш в Redis
-    await redis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
-    console.log('[Worker] 💾 Result cached for 24h');
+    // 🔥 FIX: Безопасная запись в кэш
+    if (redis) {
+        await redis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
+        console.log('[Worker] 💾 Result cached for 24h');
+    }
 
     await sendPush(pushToken, result.verdict, savedCheck.id);
     await job.updateProgress(100);
@@ -186,7 +190,7 @@ async function processVerification(job) {
     if (cleanupCallback) {
         try { cleanupCallback(); } catch(e) { console.error('Cleanup error:', e.message); }
     } else if (audioFile) {
-        cleanupFile(audioFile); // Фоллбек на старую очистку
+        cleanupFile(audioFile);
     }
   }
 }
@@ -196,7 +200,7 @@ async function sendPush(token, verdict, id) {
         const statusEmoji = verdict === 'CONFIRMED' ? '✅' : verdict === 'CONTRADICTED' ? '❌' : '⚠️';
         const messages = [{
           to: token, sound: 'default', title: `${statusEmoji} Проверка завершена`,
-          body: `Вердикт: ${verdict}. Нажмите для отчета.`, data: { resultId: id },
+          body: `Вердикт: ${verdict}.\nНажмите для отчета.`, data: { resultId: id },
         }];
         const chunks = expo.chunkPushNotifications(messages);
         for (const chunk of chunks) {

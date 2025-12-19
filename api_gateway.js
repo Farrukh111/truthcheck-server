@@ -1,3 +1,4 @@
+// server/api_gateway.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -7,7 +8,8 @@ const { verificationQueue } = require('./queues/setup');
 const billingGuard = require('./middleware/billingGuard');
 const authMiddleware = require('./middleware/auth');
 const { PrismaClient } = require('@prisma/client');
-const { redisOptions } = require('./config/redis');
+const { redisOptions } = require('./config/redis'); // Используем наш безопасный конфиг
+
 // 🔥 FIX: Импорт DNS для защиты SSRF
 const dns = require('dns').promises;
 const { URL } = require('url');
@@ -18,10 +20,12 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Слушатель событий очереди
-const queueEvents = new QueueEvents('verification-queue', { connection: redisOptions });
+// 🔥 FIX: Создаем слушатель событий ТОЛЬКО если есть настройки Redis
+const queueEvents = redisOptions 
+  ? new QueueEvents('verification-queue', { connection: redisOptions }) 
+  : null;
 
-// Лимитер для статуса
+// Лимитер для статуса (хранит в памяти по умолчанию, так что Redis тут не нужен)
 const statusLimiter = rateLimit({
   windowMs: 3000, 
   max: 5, 
@@ -33,14 +37,12 @@ const statusLimiter = rateLimit({
 // 🔥 FIX: Бронебойная защита от SSRF (DNS Resolution)
 async function isDangerousUrl(inputUrl) {
     if (!inputUrl || typeof inputUrl !== 'string') return true;
-
     try {
         const parsed = new URL(inputUrl);
         // Разрешаем только HTTP/HTTPS
         if (!['http:', 'https:'].includes(parsed.protocol)) return true;
 
         const hostname = parsed.hostname;
-
         // 1. Быстрая проверка на локалхост
         if (['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(hostname)) return true;
 
@@ -91,6 +93,12 @@ app.post('/api/v1/verify', authMiddleware, billingGuard, async (req, res) => {
   }
 
   try {
+    // Проверка: запущена ли очередь?
+    if (!verificationQueue) {
+        console.error("[API] Queue not initialized (Redis missing?)");
+        return res.status(503).json({ error: 'Service unavailable (Queue offline)' });
+    }
+
     const job = await verificationQueue.add('verify-claim', {
       userId: req.user.id,
       type, content, claimId, pushToken
@@ -107,6 +115,8 @@ app.post('/api/v1/verify', authMiddleware, billingGuard, async (req, res) => {
 // 2. Статус
 app.get('/api/v1/status/:jobId', authMiddleware, statusLimiter, async (req, res) => {
   try {
+    if (!verificationQueue) return res.status(503).json({ error: 'Queue offline' });
+
     const job = await verificationQueue.getJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
@@ -141,6 +151,7 @@ app.get('/api/v1/events/:jobId', async (req, res) => {
 
     const checkImmediateStatus = async () => {
         try {
+            if (!verificationQueue) return false;
             const job = await verificationQueue.getJob(jobId);
             if (!job) return false;
 
@@ -164,7 +175,7 @@ app.get('/api/v1/events/:jobId', async (req, res) => {
     if (await checkImmediateStatus()) return;
 
     const heartbeat = setInterval(() => res.write(`: ping\n\n`), 15000);
-    const idleTimeout = setTimeout(() => { res.end(); }, 120000);
+    const idleTimeout = setTimeout(() => { res.end(); }, 120000); // 2 минуты
 
     const onProgress = ({ jobId: id, data }) => {
         if (id === jobId) {
@@ -190,23 +201,32 @@ app.get('/api/v1/events/:jobId', async (req, res) => {
         }
     };
 
-    queueEvents.on('progress', onProgress);
-    queueEvents.on('completed', onCompleted);
-    queueEvents.on('failed', onFailed);
+    // 🔥 FIX: Подписываемся только если Redis доступен
+    if (queueEvents) {
+        queueEvents.on('progress', onProgress);
+        queueEvents.on('completed', onCompleted);
+        queueEvents.on('failed', onFailed);
+    } else {
+        // Если Redis нет, SSE будет работать как "длинный опрос" только для завершенных задач
+        console.warn("[SSE] QueueEvents disabled (No Redis). Real-time updates limited.");
+    }
 
     req.on('close', () => {
         clearInterval(heartbeat);
         clearTimeout(idleTimeout);
-        queueEvents.off('progress', onProgress);
-        queueEvents.off('completed', onCompleted);
-        queueEvents.off('failed', onFailed);
+        // 🔥 FIX: Отписываемся безопасно
+        if (queueEvents) {
+            queueEvents.off('progress', onProgress);
+            queueEvents.off('completed', onCompleted);
+            queueEvents.off('failed', onFailed);
+        }
     });
 });
 
 // 4. Health
 app.get('/health', async (req, res) => {
     try {
-        await verificationQueue.client.ping(); 
+        if (verificationQueue) await verificationQueue.client.ping(); 
         await prisma.$queryRaw`SELECT 1`;      
         res.json({ status: 'ok', uptime: process.uptime() });
     } catch (e) {

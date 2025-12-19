@@ -18,7 +18,8 @@ const routerClient = new OpenAI({
   defaultHeaders: { "X-Title": "TruthCheck AI" }
 });
 
-const redis = new Redis(redisOptions);
+// 🔥 FIX: Безопасное подключение. Если Redis нет (Render без URL), переменная будет null.
+const redis = redisOptions ? new Redis(redisOptions) : null;
 
 // --- 🛠️ 1. УТИЛИТА: РЕТРАИ (Повторные попытки) ---
 // Проверяет, является ли ошибка критической (401/403/Quota)
@@ -57,7 +58,6 @@ function smartTrim(text, maxLength) {
     rawSlice.lastIndexOf('!'), 
     rawSlice.lastIndexOf('?')
   );
-
   return lastSentenceEnd > maxLength * 0.5 
     ? rawSlice.slice(0, lastSentenceEnd + 1) 
     : rawSlice;
@@ -67,22 +67,18 @@ function smartTrim(text, maxLength) {
 function extractJSONSafe(text) {
   try {
     if (!text || typeof text !== 'string') return null;
-
     // 1. Удаляем <think>, code fences и \r
     let s = text.replace(/<think>[\s\S]*?<\/think>/gi, '')
                 .replace(/```(?:json)?/gi, '')
                 .replace(/\r/g, '');
-
     // 2. Находим границы JSON
     const first = s.indexOf('{');
     const last = s.lastIndexOf('}');
     if (first === -1 || last === -1 || last <= first) return null;
-
     let candidate = s.slice(first, last + 1);
 
     // 3. Убираем trailing commas: ,} и ,]
     candidate = candidate.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
-
     // 4. Убираем невидимые управляющие символы
     candidate = candidate.replace(/[\u0000-\u001F]+/g, ' ');
 
@@ -116,8 +112,11 @@ async function searchTavily(query) {
   const cacheKey = `tavily:${queryHash}`;
 
   try {
-    const cached = await redis.get(cacheKey);
-    if (cached) return JSON.parse(cached);
+    // 🔥 FIX: Читаем кэш только если Redis подключен
+    if (redis) {
+        const cached = await redis.get(cacheKey);
+        if (cached) return JSON.parse(cached);
+    }
 
     const res = await axios.post("[https://api.tavily.com/search](https://api.tavily.com/search)", {
       api_key: process.env.TAVILY_API_KEY,
@@ -128,7 +127,7 @@ async function searchTavily(query) {
     }, { 
       timeout: 10000 // 🔥 FIX: Таймаут 10 сек, чтобы не висеть вечно
     });
-    
+
     if (!res.data?.results?.length) return null;
 
     const cleanedResults = res.data.results
@@ -138,14 +137,15 @@ async function searchTavily(query) {
         url: r.url, 
         content: r.content.slice(0, 350) 
       }));
-      
-    if (cleanedResults.length > 0) {
+
+    // 🔥 FIX: Пишем в кэш только если Redis подключен
+    if (cleanedResults.length > 0 && redis) {
         await redis.set(cacheKey, JSON.stringify(cleanedResults), 'EX', 86400);
     }
     return cleanedResults;
   } catch (e) {
     console.error("[Tavily] Error:", e.message);
-    return null; 
+    return null;
   }
 }
 
@@ -155,7 +155,6 @@ async function analyzeContentType(text) {
 
   console.log('[AI Gatekeeper] 🛡️ Analyzing content structure...');
   const safeText = smartTrim(text, 1500);
-
   const prompt = `
     You are a highly accurate MEDIA-TYPE CLASSIFIER.
     INPUT: """${safeText}"""
@@ -166,7 +165,6 @@ async function analyzeContentType(text) {
     OUTPUT STRICT JSON:
     { "type": "...", "title": null, "media_confidence": 0.0-1.0, "summary": "max 10 words" }
   `;
-
   try {
     const completion = await callModelWithRetry(() => routerClient.chat.completions.create({
       model: "openai/gpt-4o-mini",
@@ -174,14 +172,13 @@ async function analyzeContentType(text) {
       temperature: 0.0,
       response_format: { type: "json_object" }
     }));
-    
     const raw = JSON.parse(completion.choices[0].message.content);
     
     // Safety mapping
     const ALLOWED = ['movie', 'series', 'song', 'anime', 'entertainment', 'noise', 'claims'];
     let safeType = (raw.type || '').toLowerCase().trim();
     if (!ALLOWED.includes(safeType)) safeType = 'claims';
-
+    
     if (safeText.includes('♪') || safeText.toLowerCase().includes('куплет')) {
         if (safeType === 'claims') safeType = 'song';
     }
@@ -192,7 +189,6 @@ async function analyzeContentType(text) {
         media_confidence: Number(raw.media_confidence) || 0,
         summary: (raw.summary || "Описание недоступно.").substring(0, 150)
     };
-
   } catch (e) {
     console.error('[AI Gatekeeper] Error:', e.message);
     return { type: "claims", summary: "Ошибка классификации" };
@@ -202,9 +198,8 @@ async function analyzeContentType(text) {
 // --- 7. FACT CHECKER (С АТРИБУЦИЕЙ ИСТОЧНИКОВ) ---
 async function verifyClaim(text) {
   console.log(`[AI] Checking: "${text.substring(0, 40)}..."`);
-  
   let searchContext = ""; // Строка для промпта
-  let sourcesList = [];   // Массив для JSON результата
+  let sourcesList = []; // Массив для JSON результата
 
   if (process.env.TAVILY_API_KEY) {
     const search = await searchTavily(text);
@@ -230,7 +225,8 @@ async function verifyClaim(text) {
     - Analyze distinct factual claims.
     - Be concise.
 
-    IMPORTANT: For each breakdown item, specify "source_id" (number) from EVIDENCE that best proves/disproves it. If no source, use 0.
+    IMPORTANT: For each breakdown item, specify "source_id" (number) from EVIDENCE that best proves/disproves it.
+    If no source, use 0.
 
     OUTPUT JSON ONLY:
     {
@@ -253,8 +249,8 @@ async function verifyClaim(text) {
           model: "deepseek/deepseek-r1",
           messages: [{ role: "user", content: deepSeekPrompt }],
           temperature: 0.1 
-      }), 3, 2000); 
-      
+      }), 3, 2000);
+
       const rawContent = completion.choices[0].message.content;
       const json = extractJSONSafe(rawContent);
       
@@ -279,9 +275,8 @@ async function verifyClaim(text) {
       }
       
       throw new Error("Failed to parse JSON");
-
   } catch (e) { 
-      console.error("[AI] Verification failed:", e.message); 
+      console.error("[AI] Verification failed:", e.message);
       return { 
           verdict: "UNCERTAIN", 
           summary: "Сервис временно перегружен.", 

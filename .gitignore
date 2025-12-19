@@ -1,6 +1,11 @@
-node_modules
+node_modules/
+.expo/
+dist/
 .env
+*.pem
 cookies.txt
-npm-debug.log
-.DS_Store
 temp/
+prisma/dev.db
+prisma/dev.db-journal
+android/
+ios/
