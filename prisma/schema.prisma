@@ -1,0 +1,40 @@
+// server/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // 🔥 ВАЖНО: Используем PostgreSQL (Neon Tech)
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id // Device ID
+  email     String?  @unique
+  tier      String   @default("FREE")
+  createdAt DateTime @default(now())
+  checks    Check[]
+}
+
+model Check {
+  id          String   @id @default(uuid())
+  createdAt   DateTime @default(now())
+  
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+
+  type        String   // "video", "text"
+  content     String   // Ссылка или текст
+  
+  verdict     String?  // CONFIRMED, FAKE...
+  confidence  Float?
+  summary     String?  @db.Text
+  aiModel     String?
+  durationMs  Int?
+
+  // 🔥 НОВЫЕ ПОЛЯ ДЛЯ ПОЛНОЙ ИСТОРИИ
+  keyClaim    String?  @db.Text // Краткая суть
+  sources     String?  @db.Text // JSON-строка с массивом ссылок
+}
