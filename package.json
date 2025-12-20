@@ -3,15 +3,19 @@
   "version": "1.0.0",
   "main": "api_gateway.js",
   "scripts": {
-    "start:api": "npx prisma generate && npx prisma db push --accept-data-loss && node api_gateway.js",
-    "start:worker": "npx prisma generate && node worker_entry.js",
+    "postinstall": "npx prisma generate",
+    "start:api": "npx prisma db push --accept-data-loss && node api_gateway.js",
+    "start:worker": "node worker_entry.js",
     "dev:api": "nodemon api_gateway.js",
-    "dev:worker": "nodemon worker_entry.js"
+    "dev:worker": "nodemon worker_entry.js",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
     "axios": "^1.13.2",
     "bullmq": "^5.65.1",
+    "concurrently": "^9.1.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
     "expo-server-sdk": "^4.0.0",
@@ -21,7 +25,10 @@
     "ioredis": "^5.8.2",
     "openai": "^4.20.0",
     "uuid": "^9.0.1",
-    "yt-dlp-exec": "^1.0.2"
+    "yt-dlp-exec": "^1.0.2",
+    "expo": "~52.0.48",
+    "react": "18.3.1",
+    "react-native": "0.76.9"
   },
   "devDependencies": {
     "nodemon": "^3.0.0",

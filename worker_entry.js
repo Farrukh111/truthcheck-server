@@ -1,19 +1,47 @@
+// server/worker_entry.js
 require('dotenv').config();
-const { initWorker } = require('./workers/verificationWorker');
+const { Worker } = require('bullmq');
 const fs = require('fs');
 const path = require('path');
+const { connection } = require('./config/redis'); // Наш конфиг
+const verificationWorker = require('./workers/verificationWorker'); // Ваша логика проверки
 
-// Запуск основного воркера
-initWorker();
+console.log('🚀 Verification Worker Starting...');
 
-// 🔥 ДВОРНИК (CLEANUP SERVICE)
-// Удаляет временные файлы старше 1 часа каждые 30 минут
+// ==========================================
+// 1. ЗАПУСК ВОРКЕРА (ПОВАР)
+// ==========================================
+const worker = new Worker('verificationQueue', verificationWorker, {
+  connection,
+  concurrency: 2, // Обрабатываем по 2 задачи параллельно
+  lockDuration: 60000,
+});
+
+worker.on('ready', () => {
+  console.log('✅ [Worker] Ready to process jobs!');
+});
+
+worker.on('failed', (job, err) => {
+  console.error(`❌ [Worker] Job ${job.id} failed: ${err.message}`);
+});
+
+worker.on('completed', (job) => {
+  console.log(`✅ [Worker] Job ${job.id} completed!`);
+});
+
+// ==========================================
+// 2. ДВОРНИК (CLEANUP SERVICE)
+// ==========================================
 const TEMP_DIR = path.join(__dirname, 'temp');
+
+// Создаем папку temp, если её нет
+if (!fs.existsSync(TEMP_DIR)) {
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
+}
 
 setInterval(() => {
   console.log('[Cleanup] 🧹 Checking for old files...');
-  if (!fs.existsSync(TEMP_DIR)) return;
-
+  
   fs.readdir(TEMP_DIR, (err, files) => {
     if (err) return console.error('[Cleanup] Error reading dir:', err);
 
@@ -32,10 +60,11 @@ setInterval(() => {
       });
     });
   });
-}, 1800000); // 30 минут
+}, 1800000); // Запуск каждые 30 минут
 
-// Graceful Shutdown
+// Graceful Shutdown (Аккуратное выключение)
 process.on('SIGTERM', async () => {
-  console.log('Worker is shutting down...');
+  console.log('🛑 Worker shutting down...');
+  await worker.close();
   process.exit(0);
 });

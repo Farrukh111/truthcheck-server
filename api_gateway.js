@@ -16,7 +16,7 @@ const { URL } = require('url');
 
 const prisma = new PrismaClient();
 const app = express();
-
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use(cors());
 
