@@ -4,8 +4,9 @@ const CobaltProvider = require('./providers/CobaltProvider');
 class VideoManager {
   constructor() {
     this.providers = [
+      new CobaltProvider(),
       new YtDlpProvider(), // 1. Основной (Дешевый/Локальный)
-      new CobaltProvider() // 2. Запасной (Для TikTok/Instagram/Shorts)
+      
     ];
   }
 
