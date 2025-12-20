@@ -8,8 +8,12 @@ const { pipeline } = require('stream/promises');
 
 const TEMP_DIR = path.join(__dirname, '../../../temp');
 
-// Используем публичный инстанс (или свой, если поднимете)
-const COBALT_API = process.env.COBALT_URL || 'https://api.cobalt.tools/api/json';
+// 🔥 СПИСОК СЕРВЕРОВ (Если один лежит, пробуем другой)
+const COBALT_INSTANCES = [
+  'https://api.cobalt.tools/api/json',       // Официальный (иногда строгий)
+  'https://cobalt.api.kwiatekmiki.pl/api/json', // Запасной 1
+  'https://api.dl.shadows.gay/api/json'      // Запасной 2
+];
 
 class CobaltProvider extends BaseProvider {
   constructor() {
@@ -17,63 +21,73 @@ class CobaltProvider extends BaseProvider {
   }
 
   async process(url) {
-    try {
-      console.log(`[Cobalt] Requesting: ${url}`);
-      
-      // 🔥 FIX: Упрощенные заголовки и параметры, чтобы не злить API
-      const response = await axios.post(COBALT_API, {
-        url: url,
-        // Когда просим аудио, убираем видео-параметры, иначе API вернет 400
-        isAudioOnly: true, 
-        aFormat: 'mp3',
-        filenamePattern: 'classic'
-      }, {
-        headers: {
-           'Accept': 'application/json',
-           'Content-Type': 'application/json',
-           // 🔥 FIX: Прикидываемся браузером, а не ботом
-           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    // 1. Очищаем ссылку от мусора (?si=...)
+    const cleanUrl = url.split('?')[0]; 
+    console.log(`[Cobalt] 🧹 Cleaned URL: ${cleanUrl}`);
+
+    // 2. Перебираем сервера по очереди
+    for (const apiBase of COBALT_INSTANCES) {
+      try {
+        console.log(`[Cobalt] 🔄 Trying server: ${apiBase}`);
+        
+        const response = await axios.post(apiBase, {
+          url: cleanUrl,
+          // Простой конфиг, который работает везде
+          vQuality: "144",
+          isAudioOnly: true,
+          filenamePattern: "classic"
+        }, {
+          headers: {
+             'Accept': 'application/json',
+             'Content-Type': 'application/json',
+             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+          },
+          timeout: 10000 // Ждем максимум 10 сек
+        });
+
+        // Проверяем ответ
+        const data = response.data;
+        if (!data) throw new Error("Empty response");
+
+        // Если сервер вернул прямую ссылку (stream) или redirect
+        if (['stream', 'redirect'].includes(data.status)) {
+            return await this.downloadStream(data.url);
         }
-      });
+        
+        // Если сервер вернул 'picker' (выбор), берем аудио
+        if (data.status === 'picker' && data.picker) {
+            const audioItem = data.picker.find(p => p.type === 'audio') || data.picker[0];
+            if (audioItem) return await this.downloadStream(audioItem.url);
+        }
 
-      // Cobalt возвращает разные статусы. Нам нужен 'stream' или 'redirect'
-      if (!response.data || !['stream', 'redirect', 'picker'].includes(response.data.status)) {
-          console.warn('[Cobalt] API Error / Picker:', response.data);
-          // Если Cobalt вернул 'picker' (несколько вариантов), берем первый url
-          if (response.data.status === 'picker' && response.data.picker && response.data.picker.length > 0) {
-              return await this.downloadStream(response.data.picker[0].url);
-          }
-          return null;
+        console.warn(`[Cobalt] ⚠️ Server ${apiBase} returned status: ${data.status}`);
+
+      } catch (e) {
+        // Логируем ошибку, но НЕ останавливаемся — идем к следующему серверу
+        const errorDetails = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+        console.warn(`[Cobalt] ❌ Failed on ${apiBase}: ${errorDetails}`);
       }
-
-      return await this.downloadStream(response.data.url);
-
-    } catch (e) {
-      // Логируем детали ошибки от Axios
-      const status = e.response?.status;
-      const data = JSON.stringify(e.response?.data || {});
-      console.error(`[Cobalt] Failed (${status}): ${data} - ${e.message}`);
-      return null;
     }
+
+    console.error('[Cobalt] 💀 All instances failed.');
+    return null;
   }
 
-  // Вынес скачивание в отдельный метод
   async downloadStream(downloadUrl) {
       const fileId = uuidv4();
       const filePath = path.join(TEMP_DIR, `${fileId}.mp3`);
 
-      console.log(`[Cobalt] Downloading from: ${downloadUrl}`);
+      console.log(`[Cobalt] ⬇️ Downloading file...`);
 
       const fileStream = fs.createWriteStream(filePath);
       const dlResponse = await axios.get(downloadUrl, { 
           responseType: 'stream',
-          headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          }
+          headers: { 'User-Agent': 'Mozilla/5.0' } // Важно для скачивания
       });
       
       await pipeline(dlResponse.data, fileStream);
 
+      console.log(`[Cobalt] ✅ Download success: ${filePath}`);
       return {
           type: 'audio',
           filePath: filePath,
