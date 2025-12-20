@@ -79,7 +79,18 @@ async function isDangerousUrl(inputUrl) {
 }
 
 // === ЭНДПОИНТЫ ===
-
+// 👇 ВСТАВИТЬ СЮДА (НАЧАЛО)
+// Корневой маршрут - Визитка для инвесторов/Bytez
+app.get('/', (req, res) => {
+  res.status(200).json({
+    service: "TruthCheck AI API",
+    status: "🟢 Online",
+    version: "1.0.0-beta",
+    description: "Multi-modal forensic fact-checking engine for short-form video.",
+    documentation: "Private (Available upon request)"
+  });
+});
+// 👆 ВСТАВИТЬ СЮДА (КОНЕЦ)
 // 1. Отправка задачи
 app.post('/api/v1/verify', authMiddleware, billingGuard, async (req, res) => {
   const { type, content, claimId, pushToken } = req.body;
