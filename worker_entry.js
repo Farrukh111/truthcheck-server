@@ -1,33 +1,16 @@
 // server/worker_entry.js
 require('dotenv').config();
-const { Worker } = require('bullmq');
+const { initWorker } = require('./workers/verificationWorker'); // 👈 Импортируем готовую функцию
 const fs = require('fs');
 const path = require('path');
-const { connection } = require('./config/redis'); // Наш конфиг
-const verificationWorker = require('./workers/verificationWorker'); // Ваша логика проверки
 
 console.log('🚀 Verification Worker Starting...');
 
 // ==========================================
 // 1. ЗАПУСК ВОРКЕРА (ПОВАР)
 // ==========================================
-const worker = new Worker('verificationQueue', verificationWorker, {
-  connection,
-  concurrency: 2, // Обрабатываем по 2 задачи параллельно
-  lockDuration: 60000,
-});
-
-worker.on('ready', () => {
-  console.log('✅ [Worker] Ready to process jobs!');
-});
-
-worker.on('failed', (job, err) => {
-  console.error(`❌ [Worker] Job ${job.id} failed: ${err.message}`);
-});
-
-worker.on('completed', (job) => {
-  console.log(`✅ [Worker] Job ${job.id} completed!`);
-});
+// initWorker сам создает Worker и подключается к Redis
+const worker = initWorker(); 
 
 // ==========================================
 // 2. ДВОРНИК (CLEANUP SERVICE)
@@ -65,6 +48,8 @@ setInterval(() => {
 // Graceful Shutdown (Аккуратное выключение)
 process.on('SIGTERM', async () => {
   console.log('🛑 Worker shutting down...');
-  await worker.close();
+  if (worker) {
+      await worker.close();
+  }
   process.exit(0);
 });
