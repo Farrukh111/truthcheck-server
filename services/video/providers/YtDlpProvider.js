@@ -1,132 +1,112 @@
-const BaseProvider = require('./BaseProvider');
-const ytDlp = require('yt-dlp-exec');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
-// Убедитесь, что ProxyProvider.js лежит в server/services/
-const ProxyProvider = require('../../ProxyProvider'); 
 
-// Путь к папке temp (на 3 уровня выше: providers -> video -> services -> server -> temp)
-const TEMP_DIR = path.join(__dirname, '../../../temp');
-
-if (!fs.existsSync(TEMP_DIR)) {
-  fs.mkdirSync(TEMP_DIR, { recursive: true });
-}
-
-class YtDlpProvider extends BaseProvider {
+class YtDlpProvider {
   constructor() {
-    super('yt-dlp (Local)');
+    // Путь к cookies.txt (поднимаемся на 4 уровня вверх: video -> providers -> services -> server -> root)
+    this.cookiesPath = path.resolve(__dirname, '../../../../cookies.txt');
   }
 
-  getOptions() {
-    const options = {
-      noPlaylist: true,
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    };
-    
-    // 1. Прокси
-    const proxy = ProxyProvider.getNextProxy();
-    if (proxy) options.proxy = proxy;
+  /**
+   * Получает длительность видео (сек).
+   * Используется для быстрой проверки лимита (Fail Fast).
+   */
+  async getVideoDuration(url) {
+    const args = [
+      url,
+      '--dump-json',       // Только JSON метаданные
+      '--no-playlist',
+      '--skip-download',   // Самое важное: не качаем видео
+      '--quiet',
+      '--no-warnings'
+    ];
 
-    // 2. Cookies (Файл cookies.txt должен лежать в корне server)
-    // providers -> video -> services -> server -> cookies.txt
-    const cookiePath = path.join(__dirname, '../../../cookies.txt');
-    if (fs.existsSync(cookiePath)) {
-        options.cookies = cookiePath;
-    }
+    if (fs.existsSync(this.cookiesPath)) args.push('--cookies', this.cookiesPath);
+    // Берем прокси из ENV, так надежнее для MVP
+    if (process.env.PROXY_URL) args.push('--proxy', process.env.PROXY_URL);
 
-    return options;
-  }
+    return new Promise((resolve, reject) => {
+      // Таймаут 30 секунд на получение инфы
+      const process = spawn('yt-dlp', args, { timeout: 30000 });
+      let output = '';
+      let stderr = '';
 
-  async getMetadata(url) {
-    try {
-      const output = await ytDlp(url, {
-        ...this.getOptions(),
-        dumpJson: true,
-        skipDownload: true
-      });
-      return { duration: output.duration, title: output.title, source: 'yt-dlp' };
-    } catch (e) {
-      console.warn(`[YtDlp] Metadata failed: ${e.message}`);
-      return null;
-    }
-  }
+      // Собираем данные
+      process.stdout.on('data', (d) => { output += d.toString(); });
+      process.stderr.on('data', (d) => { stderr += d.toString(); });
 
-  async process(url) {
-    const fileId = uuidv4();
-    const outputTemplate = path.join(TEMP_DIR, `${fileId}.%(ext)s`);
-
-    try {
-      // 1. Пробуем скачать СУБТИТРЫ
-      try {
-        await ytDlp(url, {
-          ...this.getOptions(),
-          skipDownload: true,
-          writeAutoSub: true,
-          writeSub: true,
-          subLang: 'ru,en',
-          output: path.join(TEMP_DIR, `${fileId}`),
-        });
-
-        // Ищем скачанный файл (.vtt или .srt)
-        const files = fs.readdirSync(TEMP_DIR);
-        const sub = files.find(f => f.startsWith(fileId) && (f.endsWith('.vtt') || f.endsWith('.srt')));
-        
-        if (sub) {
-            const subPath = path.join(TEMP_DIR, sub);
-            const content = fs.readFileSync(subPath, 'utf-8');
+      process.on('close', (code) => {
+        if (code === 0) {
+          try {
+            const json = JSON.parse(output);
             
-            // Чистим мусор VTT
-            const cleanContent = content
-               .replace(/WEBVTT/g, '')
-               .replace(/NOTE .*/g, '')
-               .replace(/-->.*/g, '')
-               .replace(/\d{2}:\d{2}.*/g, '')
-               .replace(/<[^>]*>/g, '')
-               .trim();
-
-            if (cleanContent.length > 50) {
-               return { 
-                   type: 'text', 
-                   content: cleanContent, 
-                   cleanup: () => { try { fs.unlinkSync(subPath) } catch(e){} } 
-               };
+            // Если длительность не пришла (например, прямой эфир)
+            if (!json.duration || typeof json.duration !== 'number') {
+               return reject(new Error('VIDEO_DURATION_UNKNOWN'));
             }
+            resolve(json.duration);
+          } catch (e) {
+            reject(new Error('Failed to parse video metadata'));
+          }
+        } else {
+          console.error(`[YtDlp Meta Error]: ${stderr}`);
+          reject(new Error('Failed to get video duration'));
         }
-      } catch (err) {
-        // Ошибки субтитров игнорируем, идем качать аудио
-        console.log('[YtDlp] Subtitles not found, downloading audio...');
-      }
-
-      // 2. Качаем АУДИО (если сабов нет)
-      await ytDlp(url, {
-        ...this.getOptions(),
-        extractAudio: true,
-        audioFormat: 'mp3',
-        output: outputTemplate,
-        downloadSections: "*00:00-03:00", // Лимит 3 мин
-        forceKeyframesAtCuts: true,
       });
+    });
+  }
 
-      const files = fs.readdirSync(TEMP_DIR);
-      const audio = files.find(f => f.startsWith(fileId) && f.endsWith('.mp3'));
-      
-      if (audio) {
-          const audioPath = path.join(TEMP_DIR, audio);
-          return { 
-              type: 'audio', 
-              filePath: audioPath, 
-              cleanup: () => { try { fs.unlinkSync(audioPath) } catch(e){} } 
-          };
-      }
-      
-      throw new Error('Audio file missing after download');
+  /**
+   * Скачивает аудио (WAV 16kHz).
+   * Строго ограничивает длину скачивания.
+   */
+  async downloadAudioSegment(url, outputId, duration = 180) {
+    // Путь к temp (поднимаемся на 4 уровня вверх)
+    const outputPath = path.resolve(__dirname, '../../../../temp', `${outputId}.wav`);
+    
+    // Создаем папку temp, если её нет
+    const tempDir = path.dirname(outputPath);
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
-    } catch (e) {
-      console.error(`[YtDlp] Process failed: ${e.message}`);
-      return null;
-    }
+    // Конвертация секунд в формат MM:SS для ffmpeg
+    const minutes = Math.floor(duration / 60);
+    const seconds = duration % 60;
+    const endTime = `00:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    const timeSection = `*00:00-${endTime}`; 
+    
+    const args = [
+      url,
+      '-x',                                             // Извлечь аудио
+      '--audio-format', 'wav',                          // Формат WAV
+      '--postprocessor-args', 'ffmpeg:-ar 16000 -ac 1', // Принудительно 16kHz Mono (для Whisper)
+      '--download-sections', timeSection,               // Качаем только кусок
+      '--force-overwrites',
+      '--quiet',
+      '--no-warnings',
+      '-o', outputPath,
+    ];
+
+    if (fs.existsSync(this.cookiesPath)) args.push('--cookies', this.cookiesPath);
+    if (process.env.PROXY_URL) args.push('--proxy', process.env.PROXY_URL);
+
+    return new Promise((resolve, reject) => {
+      // Таймаут 3.5 минуты (на случай медленного прокси)
+      const process = spawn('yt-dlp', args, { timeout: 210000 });
+      let stderr = '';
+      
+      process.stderr.on('data', d => stderr += d);
+
+      process.on('close', (code) => {
+        if (code === 0 && fs.existsSync(outputPath)) {
+          resolve(outputPath);
+        } else {
+          console.error(`[YtDlp Download Error]: ${stderr}`);
+          reject(new Error(`yt-dlp failed with code ${code}`));
+        }
+      });
+    });
   }
 }
 
-module.exports = YtDlpProvider;
+module.exports = new YtDlpProvider();

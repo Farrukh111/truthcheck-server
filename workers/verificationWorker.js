@@ -1,17 +1,19 @@
-// server/workers/verificationWorker.js
 const { Worker } = require('bullmq');
 const { PrismaClient } = require('@prisma/client');
 const { Expo } = require('expo-server-sdk');
 const crypto = require('crypto');
 const Redis = require('ioredis');
 const { redisOptions } = require('../config/redis');
+const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
 
 // 🔥 FIX: Безопасное подключение. Если настроек нет — redis будет null.
 const redis = redisOptions ? new Redis(redisOptions) : null;
 
 // Импорты сервисов
-const VideoManager = require('../services/video/VideoManager');
-const { cleanupFile } = require('../services/videoProcessor');
+// Мы используем ytDlpProvider напрямую для контроля пайплайна
+const ytDlp = require('../services/video/providers/YtDlpProvider'); 
 const { transcribeAudio, verifyClaim, analyzeContentType } = require('../services/aiService');
 const ClaimExtractor = require('../services/claimExtractor');
 
@@ -32,19 +34,21 @@ function normalizeVerdict(verdict) {
 
 async function processVerification(job) {
   const { type, content, timestamp, pushToken } = job.data;
-  console.log(`[Worker] ⚙️ Processing job ${job.id} (${type})`);
+  const verificationId = job.id; // ID задачи для имени файла
+  console.log(`[Worker] ⚙️ Processing job ${verificationId} (${type})`);
   await job.updateProgress(5);
 
   const contentHash = crypto.createHash('md5').update(content.trim()).digest('hex');
   const cacheKey = `result:${contentHash}`;
-  let audioFile = null;
-  let cleanupCallback = null;
+  
+  // Переменные для путей файлов (чтобы удалить их в finally)
+  let rawAudioFile = null;
+  let cleanAudioFile = null;
 
   try {
     // ---------------------------------------------------------
     // УРОВЕНЬ 1: REDIS (Мгновенная память - RAM)
     // ---------------------------------------------------------
-    // 🔥 FIX: Проверяем, есть ли Redis перед чтением
     if (redis) {
         const cachedRedis = await redis.get(cacheKey);
         if (cachedRedis) {
@@ -75,7 +79,6 @@ async function processVerification(job) {
             dbId: existingCheck.id
         };
         
-        // 🔥 FIX: Пишем в кэш только если Redis доступен
         if (redis) {
             await redis.set(cacheKey, JSON.stringify(dbResult), 'EX', CACHE_TTL);
         }
@@ -85,36 +88,85 @@ async function processVerification(job) {
     }
 
     // ---------------------------------------------------------
-    // УРОВЕНЬ 3: ПОЛНЫЙ АНАЛИЗ (AI)
+    // УРОВЕНЬ 3: ПОЛНЫЙ АНАЛИЗ (AI + VAD PIPELINE)
     // ---------------------------------------------------------
     let analysisText = content;
 
-    // 1. Получение текста
+    // 1. Обработка ВИДЕО (Smart Pipeline)
     if (type === 'video') {
        try {
-           console.log('[Worker] 🎬 Starting VideoManager...');
-           const result = await VideoManager.process(content);
+           const tempId = `video_${verificationId}`;
+
+           // ШАГ A: Проверка длительности (Fail Fast)
+           console.log('[Worker] ⏱️ Checking duration...');
+           const duration = await ytDlp.getVideoDuration(content);
            
-           if (result.type === 'text') {
-               console.log('[Worker] 📄 Subtitles extracted directly');
-               analysisText = result.content;
-           } else if (result.type === 'audio') {
-               console.log(`[Worker] 🎧 Audio downloaded: ${result.filePath}`);
-               audioFile = result.filePath;
-               analysisText = await transcribeAudio(audioFile);
+           if (duration > 180) { // Лимит 3 минуты (180 сек)
+               throw new Error("VIDEO_TOO_LONG_LIMIT_3MIN");
+           }
+
+           // ШАГ B: Скачивание (Smart Extraction)
+           console.log('[Worker] ⬇️ Downloading audio segment...');
+           // Качаем максимум 180 сек
+           rawAudioFile = await ytDlp.downloadAudioSegment(content, tempId, 180);
+           await job.updateProgress(20);
+
+           // ШАГ C: VAD (Очистка от музыки/тишины)
+           console.log('[Worker] 🧹 Cleaning audio (VAD)...');
+           cleanAudioFile = rawAudioFile.replace('.wav', '_clean.wav');
+
+           // Запускаем Python скрипт
+           await new Promise((resolve, reject) => {
+               // Путь к скрипту относительно воркера. 
+               // Предполагается структура: server/workers/verificationWorker.js -> server/services/vad/clean_audio.py
+               const scriptPath = path.resolve(__dirname, '../services/vad/clean_audio.py');
+               
+               const python = spawn('python', [scriptPath, rawAudioFile, cleanAudioFile]);
+               
+               let stderr = '';
+               python.stderr.on('data', (d) => { stderr += d.toString(); });
+
+               python.on('close', (code) => {
+                   if (code === 0) resolve();
+                   else {
+                       console.warn(`[VAD Warning] Script failed/empty: ${stderr}`);
+                       // Если VAD не сработал (например, нет голоса), используем оригинал или падаем
+                       // Для надежности: если VAD упал, пробуем оригинал, но помечаем риск
+                       reject(new Error(`VAD processing failed: ${stderr}`));
+                   }
+               });
+           });
+           
+           await job.updateProgress(40);
+
+           // ШАГ D: Транскрибация (Whisper)
+           console.log('[Worker] 🗣️ Transcribing clean audio...');
+           // Отправляем ОЧИЩЕННЫЙ файл
+           analysisText = await transcribeAudio(cleanAudioFile);
+
+       } catch (err) {
+           console.error('[Worker] Video processing error:', err.message);
+           
+           // Специальная обработка ошибки лимита
+           if (err.message === "VIDEO_TOO_LONG_LIMIT_3MIN") {
+               return {
+                   status: 'failed',
+                   verdict: 'UNCERTAIN',
+                   summary: 'Видео слишком длинное. В демо-версии поддерживаются Shorts/Reels/TikTok до 3 минут.',
+                   error: 'LIMIT_EXCEEDED'
+               };
            }
            
-           if (result.cleanup) cleanupCallback = result.cleanup;
-       } catch (err) {
-           console.error('[Worker] Video processing died:', err.message);
-           throw new Error("Не удалось скачать видео. Возможно, приватный доступ или блокировка.");
+           throw new Error("Ошибка обработки видео: " + err.message);
        }
     }
 
     if (!analysisText || analysisText.length < 10) {
-        throw new Error("Не удалось получить текст для анализа");
+        throw new Error("Не удалось распознать речь или текст слишком короткий.");
     }
     
+    await job.updateProgress(60);
+
     // 2. Фейс-контроль (Gatekeeper)
     console.log('[Worker] 🛡️ Running Gatekeeper...');
     const classification = await analyzeContentType(analysisText);
@@ -151,8 +203,8 @@ async function processVerification(job) {
     // 3. Сохранение
     await prisma.user.upsert({ where: { id: "anon" }, update: {}, create: { id: "anon", email: "anon@truthcheck.ai" } });
     
-    const startTime = timestamp || Date.now();
-    const duration = Date.now() - startTime;
+    const startTs = timestamp || Date.now();
+    const taskDuration = Date.now() - startTs;
     
     const savedCheck = await prisma.check.create({
         data: {
@@ -163,7 +215,7 @@ async function processVerification(job) {
             confidence: result.confidence,
             summary: result.summary,
             aiModel: result.ai_details?.model || "Hybrid",
-            durationMs: duration,
+            durationMs: taskDuration,
             keyClaim: result.key_claim || null,
             sources: JSON.stringify(result.sources || []) 
         }
@@ -171,7 +223,6 @@ async function processVerification(job) {
     result.dbId = savedCheck.id;
 
     // 4. Кэш в Redis
-    // 🔥 FIX: Безопасная запись в кэш
     if (redis) {
         await redis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
         console.log('[Worker] 💾 Result cached for 24h');
@@ -184,13 +235,24 @@ async function processVerification(job) {
 
   } catch (error) {
     console.error(`[Worker] ❌ Failed: ${error.message}`);
+    // Если это наша кастомная ошибка - возвращаем её как результат, чтобы не ретраить
+    if (error.message.includes("LIMIT_EXCEEDED")) {
+        return error; 
+    }
     throw error;
   } finally {
-    // Очистка файлов
-    if (cleanupCallback) {
-        try { cleanupCallback(); } catch(e) { console.error('Cleanup error:', e.message); }
-    } else if (audioFile) {
-        cleanupFile(audioFile);
+    // 5. ГАРАНТИРОВАННАЯ ОЧИСТКА ФАЙЛОВ
+    try {
+        if (rawAudioFile && fs.existsSync(rawAudioFile)) {
+            fs.unlinkSync(rawAudioFile);
+            console.log(`[Cleanup] Deleted raw: ${rawAudioFile}`);
+        }
+        if (cleanAudioFile && fs.existsSync(cleanAudioFile)) {
+            fs.unlinkSync(cleanAudioFile);
+            console.log(`[Cleanup] Deleted clean: ${cleanAudioFile}`);
+        }
+    } catch(e) { 
+        console.error('[Cleanup Error]:', e.message); 
     }
   }
 }
@@ -213,7 +275,7 @@ const initWorker = () => {
   console.log('[Worker] 🚀 Verification Worker Initialized');
   const worker = new Worker('verification-queue', processVerification, {
     connection: redisOptions,
-    concurrency: 2,
+    concurrency: 2, // Ограничиваем параллельность для экономии CPU на VAD
   });
   worker.on('failed', (job, err) => console.error(`[Worker] 💀 Job ${job.id} failed: ${err.message}`));
   return worker;
