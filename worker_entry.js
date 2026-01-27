@@ -1,23 +1,37 @@
-// server/worker_entry.js
 require('dotenv').config();
-const { initWorker } = require('./workers/verificationWorker'); // 👈 Импортируем готовую функцию
+const { initWorker } = require('./workers/verificationWorker');
 const fs = require('fs');
 const path = require('path');
+const http = require('http'); // 👈 Добавили модуль для сервера
 
 console.log('🚀 Verification Worker Starting...');
 
 // ==========================================
 // 1. ЗАПУСК ВОРКЕРА (ПОВАР)
 // ==========================================
-// initWorker сам создает Worker и подключается к Redis
 const worker = initWorker(); 
 
 // ==========================================
-// 2. ДВОРНИК (CLEANUP SERVICE)
+// 2. ОБМАН RENDER (HEALTH CHECK) 🔥 ВАЖНО
+// ==========================================
+// Render убьет сервис через 5 мин, если мы не откроем порт.
+const PORT = process.env.PORT || 10000;
+
+const server = http.createServer((req, res) => {
+    // Отвечаем "Я жив" на любой запрос
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Worker is active. Cleanup service is running.');
+});
+
+server.listen(PORT, () => {
+    console.log(`[System] 🟢 Fake Health Server listening on port ${PORT}`);
+});
+
+// ==========================================
+// 3. ДВОРНИК (CLEANUP SERVICE)
 // ==========================================
 const TEMP_DIR = path.join(__dirname, 'temp');
 
-// Создаем папку temp, если её нет
 if (!fs.existsSync(TEMP_DIR)) {
     fs.mkdirSync(TEMP_DIR, { recursive: true });
 }
@@ -34,7 +48,7 @@ setInterval(() => {
       fs.stat(filePath, (err, stats) => {
         if (err) return;
         
-        // Если файл старше 60 минут (3600000 мс)
+        // Удаляем файлы старше 60 минут
         if (now - stats.mtimeMs > 3600000) {
            fs.unlink(filePath, (unlinkErr) => {
                if (!unlinkErr) console.log(`[Cleanup] 🗑️ Deleted old file: ${file}`);
@@ -43,11 +57,20 @@ setInterval(() => {
       });
     });
   });
-}, 1800000); // Запуск каждые 30 минут
+}, 1800000); // Каждые 30 минут
 
-// Graceful Shutdown (Аккуратное выключение)
+// ==========================================
+// 4. GRACEFUL SHUTDOWN
+// ==========================================
 process.on('SIGTERM', async () => {
   console.log('🛑 Worker shutting down...');
+  
+  // Сначала закрываем HTTP сервер
+  server.close(() => {
+      console.log('Http server closed.');
+  });
+
+  // Потом останавливаем воркер
   if (worker) {
       await worker.close();
   }
