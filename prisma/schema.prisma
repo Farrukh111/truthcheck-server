@@ -1,40 +1,46 @@
-// server/prisma/schema.prisma
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  // 🔥 ВАЖНО: Используем PostgreSQL (Neon Tech)
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 model User {
-  id        String   @id // Device ID
-  email     String?  @unique
-  tier      String   @default("FREE")
+  id        String   @id @default(cuid())
+  email     String   @unique
   createdAt DateTime @default(now())
   checks    Check[]
 }
 
 model Check {
-  id          String   @id @default(uuid())
-  createdAt   DateTime @default(now())
-  
-  userId      String
-  user        User     @relation(fields: [userId], references: [id])
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
 
-  type        String   // "video", "text"
-  content     String   // Ссылка или текст
-  
-  verdict     String?  // CONFIRMED, FAKE...
-  confidence  Float?
-  summary     String?  @db.Text
-  aiModel     String?
-  durationMs  Int?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
 
-  // 🔥 НОВЫЕ ПОЛЯ ДЛЯ ПОЛНОЙ ИСТОРИИ
-  keyClaim    String?  @db.Text // Краткая суть
-  sources     String?  @db.Text // JSON-строка с массивом ссылок
+  type      String   // "text", "video", "audio"
+  content   String   // Текст или URL (желательно уже нормализованный)
+  verdict   String   // "CONFIRMED", "CONTRADICTED", "DISPUTED", "UNCERTAIN"
+
+  confidence Float?
+  summary    String?
+  aiModel    String?
+  durationMs Int?
+  keyClaim   String?
+  sources    String?  // JSON строкой
+
+  // ✅ NEW: Trust & Cache Layer (лучше НЕ nullable)
+  pipelineVersion String @default("v1")
+  fingerprint     String
+
+  // Индексы под быстрый поиск и кэш-слои
+  @@index([content])
+  @@index([fingerprint])
+  @@index([content, pipelineVersion])
+
+  // Очень желательно: чтобы один fingerprint+pipelineVersion не плодил дубликаты
+  @@unique([fingerprint, pipelineVersion])
 }
