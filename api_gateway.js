@@ -122,10 +122,12 @@ app.post('/api/v1/verify', async (req, res) => {
 
     const job = await verificationQueue.add('verify-claim', {
       userId: req.user.id,
-      videoUrl: finalContent, // Унифицируем название поля для воркера
-      type: type || 'video',
-      claimId, 
-      pushToken
+      videoUrl: finalContent,
+      type: type || (await (async () => {
+        try { new URL(finalContent); return 'video'; } catch { return 'text'; }
+     })()),
+     claimId,
+     pushToken
     });
 
     console.log(`[API] Job ${job.id} queued for ${finalContent}`);
@@ -230,6 +232,10 @@ app.get('/health', async (req, res) => {
     } catch (e) {
         res.status(503).json({ status: 'error', reason: e.message });
     }
+app.get('/healthz', (req, res) => {
+  res.status(200).send('OK');
+
+
 });
 
 // 5. Тестовый вход (Mock Login для совместимости)

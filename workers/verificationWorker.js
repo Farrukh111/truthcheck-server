@@ -17,10 +17,10 @@ const expo = new Expo();
 
 // Настройки
 const CACHE_TTL = 86400; // 24 часа
-const LOCK_TTL = 600; // 10 минут: защита от двойной обработки при “вирусных” запросах
-const PIPELINE_VERSION = 'v1.1-fast-ffmpeg'; // поменяешь на v2-onnx-silero — кэш/DB автоматически разделятся
+const LOCK_TTL = 600; // 10 минут
+const PIPELINE_VERSION = 'v1.1-fast-ffmpeg';
 
-// Безопасное подключение к Redis
+// Redis кэш (НЕ обязателен, но желателен)
 const redis = redisOptions ? new Redis(redisOptions) : null;
 
 function normalizeVerdict(verdict) {
@@ -38,14 +38,12 @@ function canonicalizeUrl(input) {
   try {
     u = new URL(input);
   } catch {
-    return input; // не URL
+    return input;
   }
 
-  // базовая нормализация
   u.hash = '';
   const host = (u.hostname || '').toLowerCase();
 
-  // удаляем мусорные параметры (utm, t, feature и т.п.)
   const dropParams = new Set([
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
     'fbclid', 'gclid', 'igshid', 'si', 'feature', 't', 'time_continue',
@@ -54,7 +52,6 @@ function canonicalizeUrl(input) {
     if (dropParams.has(k)) u.searchParams.delete(k);
   }
 
-  // YouTube: оставляем только videoId (v) и очищаем лишнее
   if (host.includes('youtube.com')) {
     const v = u.searchParams.get('v');
     if (v) {
@@ -63,7 +60,6 @@ function canonicalizeUrl(input) {
       u.pathname = '/watch';
     }
   } else if (host === 'youtu.be') {
-    // youtu.be/<id>
     const id = u.pathname.replace('/', '').trim();
     if (id) {
       u.search = '';
@@ -71,29 +67,15 @@ function canonicalizeUrl(input) {
     }
   }
 
-  // Instagram: оставляем только pathname (обычно /reel/... или /p/...)
-  if (host.includes('instagram.com')) {
-    u.search = '';
-  }
+  if (host.includes('instagram.com')) u.search = '';
+  if (host.includes('tiktok.com')) u.search = '';
 
-  // TikTok: обычно /@user/video/<id> — оставим pathname без query
-  if (host.includes('tiktok.com')) {
-    u.search = '';
-  }
-
-  // сортируем параметры для стабильности
   const sorted = new URL(u.toString());
-  const params = Array.from(sorted.searchParams.entries())
-    .sort(([a], [b]) => a.localeCompare(b));
+  const params = Array.from(sorted.searchParams.entries()).sort(([a], [b]) => a.localeCompare(b));
   sorted.search = '';
   for (const [k, v] of params) sorted.searchParams.append(k, v);
 
   return sorted.toString();
-}
-
-function fingerprintFor(type, contentNormalized) {
-  const base = `${type}:${contentNormalized}:${PIPELINE_VERSION}`;
-  return crypto.createHash('sha256').update(base).digest('hex');
 }
 
 function fileSizeSafe(filePath) {
@@ -121,7 +103,6 @@ function enforceTrustRule(result) {
   const sources = Array.isArray(result.sources) ? result.sources : [];
   const verdict = normalizeVerdict(result.verdict);
 
-  // если модель заявила TRUE/FALSE, но источников нет — режем до UNCERTAIN
   const needsSources = (verdict === 'CONFIRMED' || verdict === 'CONTRADICTED' || verdict === 'DISPUTED');
   if (needsSources && sources.length === 0) {
     return {
@@ -134,7 +115,6 @@ function enforceTrustRule(result) {
     };
   }
 
-  // если verdict любой, но источники отсутствуют и summary пустая — тоже UNCERTAIN
   if (sources.length === 0 && (!result.summary || String(result.summary).trim().length === 0)) {
     return {
       ...result,
@@ -152,12 +132,8 @@ async function processVerification(job) {
   const startedAt = Date.now();
   console.log(`[Worker] 🛠 Processing Job ${job.id}`);
 
-  // -------------------------
-  // 0) Compatibility + Normalize
-  // -------------------------
   let { type, content, videoUrl, pushToken } = job.data || {};
 
-  // adapter: videoUrl -> content
   if ((!content || typeof content !== 'string') && typeof videoUrl === 'string') {
     console.log('[Worker] 🔄 Normalizing format: using videoUrl as content');
     content = videoUrl;
@@ -173,7 +149,6 @@ async function processVerification(job) {
     throw new Error(`CRITICAL: Job ${job.id} content is empty after trim.`);
   }
 
-  // canonicalize для видео URL, чтобы одинаковые ролики не создавали разные кэши
   let typeNormalized = type;
   if (!typeNormalized) {
     try {
@@ -188,12 +163,12 @@ async function processVerification(job) {
     contentNormalized = canonicalizeUrl(contentNormalized);
   }
 
-  // -------------------------
-  // 1) Fingerprint + L1 cache key
-  // -------------------------
   await job.updateProgress(5);
 
-  const fingerprint = fingerprintFor(typeNormalized, contentNormalized);
+  const fingerprint = crypto.createHash('sha256')
+    .update(`${typeNormalized}:${contentNormalized}:${PIPELINE_VERSION}`)
+    .digest('hex');
+
   const cacheKey = `result:${fingerprint}`;
   const lockKey = `lock:${fingerprint}`;
   const lockValue = String(job.id);
@@ -202,9 +177,7 @@ async function processVerification(job) {
   let lockAcquired = false;
 
   try {
-    // -------------------------
     // 2) L1 Cache: Redis result
-    // -------------------------
     if (redis) {
       const cached = await redis.get(cacheKey);
       if (cached) {
@@ -215,14 +188,9 @@ async function processVerification(job) {
       }
     }
 
-    // -------------------------
     // 3) L2 Cache: DB by (content + pipelineVersion)
-    // -------------------------
     const existingCheck = await prisma.check.findFirst({
-      where: {
-        content: contentNormalized,
-        pipelineVersion: PIPELINE_VERSION,
-      },
+      where: { content: contentNormalized, pipelineVersion: PIPELINE_VERSION },
       orderBy: { createdAt: 'desc' }
     });
 
@@ -244,13 +212,10 @@ async function processVerification(job) {
       return dbResult;
     }
 
-    // -------------------------
     // 4) Dedup In-Progress: Redis lock
-    // -------------------------
     if (redis) {
       const ok = await redis.set(lockKey, lockValue, 'NX', 'EX', LOCK_TTL);
       if (!ok) {
-        // Кто-то уже считает. Попробуем быстро отдать результат из Redis (если уже готов).
         const cachedAfterLockFail = await redis.get(cacheKey);
         if (cachedAfterLockFail) {
           console.log('[Worker] ⚡ REDIS HIT (after lock fail)');
@@ -259,12 +224,11 @@ async function processVerification(job) {
           return res;
         }
 
-        // Иначе — корректно завершаем без траты денег (не fail!)
         console.log('[Worker] 🧷 DUPLICATE IN PROGRESS — skipping heavy processing');
         return {
           verdict: 'UNCERTAIN',
           confidence: 0.0,
-          summary: 'Этот запрос уже обрабатывается. Пожалуйста, попробуйте открыть результат чуть позже.',
+          summary: 'Этот запрос уже обрабатывается. Пожалуйста, откройте результат чуть позже.',
           sources: [],
           key_claim: null,
           ai_details: { model: 'Dedup', pipelineVersion: PIPELINE_VERSION },
@@ -276,46 +240,46 @@ async function processVerification(job) {
       lockAcquired = true;
     }
 
-    // -------------------------
     // 5) Full pipeline
-    // -------------------------
     let analysisText = contentNormalized;
 
     if (typeNormalized === 'video') {
       console.log('[Worker] 🎬 Starting Video Pipeline (Fast FFmpeg Mode)...');
 
-      // A) Extract audio
       audioPath = await extractAudio(contentNormalized);
       await job.updateProgress(30);
 
       const originalSize = fileSizeSafe(audioPath);
 
-      // B) performVAD (FFmpeg detector - временно)
       await performVAD(audioPath);
       await job.updateProgress(50);
 
-      // Fail-safe: если VAD "съел" всё, транскрибируем оригинал (не ломаем UX)
       const afterVadSize = fileSizeSafe(audioPath);
       if (afterVadSize > 0 && originalSize > 0 && afterVadSize < Math.max(8000, Math.floor(originalSize * 0.02))) {
-        console.warn('[Worker] ⚠️ VAD produced too-small output; continuing with original audio (fail-safe).');
-        // Здесь мы предполагаем, что performVAD работает in-place.
-        // Если ваша performVAD создаёт отдельный файл — скажи, я подстрою код.
+        console.warn('[Worker] ⚠️ VAD produced too-small output; continuing (fail-safe).');
       }
 
-      // C) Transcribe
       console.log('[Worker] 🗣️ Transcribing...');
       analysisText = await transcribeAudio(audioPath);
     }
 
     if (!analysisText || String(analysisText).trim().length < 5) {
-      throw new Error('Empty transcription/result text');
+      // мягкий UX вместо "FAILED"
+      return {
+        verdict: 'UNCERTAIN',
+        confidence: 0.0,
+        summary: 'Не удалось распознать речь/текст для проверки. Возможно, в видео нет голоса или качество звука низкое.',
+        sources: [],
+        key_claim: null,
+        ai_details: { model: 'ASR', pipelineVersion: PIPELINE_VERSION },
+        dbId: null,
+        fingerprint,
+      };
     }
 
     await job.updateProgress(60);
 
-    // -------------------------
     // 6) AI Gatekeeper + Fact-check
-    // -------------------------
     console.log('[Worker] 🛡️ Running AI Analysis...');
     const classification = await analyzeContentType(analysisText);
 
@@ -338,12 +302,9 @@ async function processVerification(job) {
       result.ai_details = { ...(result.ai_details || {}), pipelineVersion: PIPELINE_VERSION };
     }
 
-    // Trust Rule enforcement (no sources => UNCERTAIN)
     result = enforceTrustRule(result);
 
-    // -------------------------
-    // 7) Save to DB (+ pipelineVersion + fingerprint)
-    // -------------------------
+    // 7) Save to DB
     await prisma.user.upsert({
       where: { id: 'anon' },
       update: {},
@@ -372,14 +333,11 @@ async function processVerification(job) {
     result.dbId = savedCheck.id;
     result.fingerprint = fingerprint;
 
-    // -------------------------
     // 8) Cache result in Redis
-    // -------------------------
     if (redis) {
       await redis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
     }
 
-    // Push
     if (pushToken) await sendPush(pushToken, result.verdict, savedCheck.id);
 
     await job.updateProgress(100);
@@ -391,19 +349,15 @@ async function processVerification(job) {
     console.error(`[Worker] ❌ Failed: ${error.message}`);
     throw error;
   } finally {
-    // release lock only if we acquired it (and only if still ours)
     if (redis && lockAcquired) {
       try {
         const current = await redis.get(lockKey);
-        if (current === lockValue) {
-          await redis.del(lockKey);
-        }
+        if (current === lockValue) await redis.del(lockKey);
       } catch (e) {
         console.error('[Lock Cleanup Error]:', e.message);
       }
     }
 
-    // cleanup audio
     if (audioPath && fs.existsSync(audioPath)) {
       try {
         fs.unlinkSync(audioPath);
@@ -438,12 +392,21 @@ async function sendPush(token, verdict, id) {
 }
 
 const initWorker = () => {
+  // ВАЖНО: без облачного Redis воркер не стартуем
+  if (!redisOptions) {
+    console.warn('[Worker] ⚠️ REDIS_URL not set — worker not started (queue disabled).');
+    return null;
+  }
+
   console.log('[Worker] 🚀 Verification Worker Initialized');
   const worker = new Worker('verification-queue', processVerification, {
     connection: redisOptions,
     concurrency: 2,
   });
+
   worker.on('failed', (job, err) => console.error(`[Worker] 💀 Job ${job?.id} failed: ${err.message}`));
+  worker.on('error', (err) => console.error(`[Worker] 🔥 Worker error: ${err.message}`));
+
   return worker;
 };
 
