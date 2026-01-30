@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
     openssl \
+    python3 \
+    python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # yt-dlp binary

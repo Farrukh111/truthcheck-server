@@ -224,18 +224,21 @@ app.get('/api/v1/events/:jobId', async (req, res) => {
 });
 
 // 4. Health Check
+a// 4. Health Check
 app.get('/health', async (req, res) => {
-    try {
-        if (verificationQueue) await verificationQueue.client.ping(); 
-        await prisma.$queryRaw`SELECT 1`;       
-        res.json({ status: 'ok', uptime: process.uptime() });
-    } catch (e) {
-        res.status(503).json({ status: 'error', reason: e.message });
+  try {
+    // Redis (если очередь инициализирована)
+    if (verificationQueue && verificationQueue.client) {
+      await verificationQueue.client.ping();
     }
-app.get('/healthz', (req, res) => {
-  res.status(200).send('OK');
 
+    // DB
+    await prisma.$queryRaw`SELECT 1`;
 
+    res.json({ status: 'ok', uptime: process.uptime() });
+  } catch (e) {
+    res.status(503).json({ status: 'error', reason: e.message });
+  }
 });
 
 // 5. Тестовый вход (Mock Login для совместимости)
