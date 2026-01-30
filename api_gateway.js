@@ -224,7 +224,7 @@ app.get('/api/v1/events/:jobId', async (req, res) => {
 });
 
 // 4. Health Check
-a// 4. Health Check
+// 4. Health Check
 app.get('/health', async (req, res) => {
   try {
     // Redis (если очередь инициализирована)
