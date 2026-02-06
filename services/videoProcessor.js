@@ -8,7 +8,6 @@ function ensureTempDir() {
   return dir;
 }
 
-// ID (Pd_nXM4kP_U) -> https://www.youtube.com/watch?v=...
 function normalizeYoutubeInput(input) {
   const s = String(input || '').trim();
   if (/^[a-zA-Z0-9_-]{11}$/.test(s)) {
@@ -17,21 +16,54 @@ function normalizeYoutubeInput(input) {
   return s;
 }
 
-/**
- * Скачивает первые 3 минуты и конвертит в WAV 16kHz mono.
- * Возвращает ПУТЬ к wav-файлу.
- */
+// 🍪 УМНАЯ ЗАГРУЗКА КУКОВ (Base64 приоритетнее)
+function getCookiesContent() {
+  if (process.env.YOUTUBE_COOKIES_B64) {
+    try {
+      return Buffer.from(process.env.YOUTUBE_COOKIES_B64, 'base64').toString('utf8');
+    } catch (e) {
+      console.error('[Cookies] ❌ Failed to decode Base64 cookies:', e.message);
+    }
+  }
+  if (process.env.YOUTUBE_COOKIES) {
+    return process.env.YOUTUBE_COOKIES;
+  }
+  return null;
+}
+
 async function extractAudio(inputUrl) {
   const url = normalizeYoutubeInput(inputUrl);
   console.log(`[Downloader] ⬇️ Processing: ${url}`);
 
   const startedAt = Date.now();
   const tempDir = ensureTempDir();
-
   const uniqueId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  
   const outTemplate = path.join(tempDir, `audio_${uniqueId}.%(ext)s`);
-  const finalPath = path.join(tempDir, `audio_${uniqueId}.wav`);
+  const expectedWavPath = path.join(tempDir, `audio_${uniqueId}.wav`);
+  const cookiesPath = path.join(tempDir, `cookies_${uniqueId}.txt`);
 
+  // 1. Подготовка куков
+  const cookiesContent = getCookiesContent();
+  const hasCookies = !!cookiesContent;
+
+  if (hasCookies) {
+    try {
+      fs.writeFileSync(cookiesPath, cookiesContent, { encoding: 'utf8', mode: 0o600 });
+      
+      // 🔍 ДИАГНОСТИКА: Проверяем размер и заголовок файла
+      const stats = fs.statSync(cookiesPath);
+      const firstLine = cookiesContent.split('\n')[0] || '';
+      console.log(`[Cookies] ✅ Loaded. Size: ${stats.size} bytes. Header check: "${firstLine.substring(0, 50)}..."`);
+      
+    } catch (e) {
+      console.error(`[Cookies] ⚠️ Error writing cookies: ${e.message}`);
+    }
+  } else {
+    console.log(`[Cookies] ⚠️ No cookies found in ENV`);
+  }
+
+  // Настройка времени (3 минуты)
   const durationSec = 180;
   const mm = Math.floor(durationSec / 60);
   const ss = durationSec % 60;
@@ -39,8 +71,8 @@ async function extractAudio(inputUrl) {
   const timeSection = `*00:00-${endTime}`;
 
   return new Promise((resolve, reject) => {
+    // 🔥 Опции ПЕРЕД ссылкой
     const args = [
-      url,
       '-x',
       '--audio-format', 'wav',
       '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000',
@@ -49,19 +81,30 @@ async function extractAudio(inputUrl) {
       '--no-playlist',
       '--no-warnings',
       '--no-progress',
+      '--geo-bypass', // ✅ Добавлено: обход гео-блоков
       '-o', outTemplate
     ];
 
-    if (process.env.PROXY_URL) args.push('--proxy', process.env.PROXY_URL);
+    if (hasCookies && fs.existsSync(cookiesPath)) {
+      args.push('--cookies', cookiesPath);
+    }
+
+    if (process.env.PROXY_URL) {
+      args.push('--proxy', process.env.PROXY_URL);
+    }
+
+    // 🔥 Ссылка ВСЕГДА последняя
+    args.push(url);
 
     const ytDlp = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let stderr = '';
-    let stdout = '';
+    let stdout = ''; // ✅ Добавлено: собираем stdout для диагностики
+
     ytDlp.stdout.on('data', (d) => { stdout += d.toString(); });
     ytDlp.stderr.on('data', (d) => { stderr += d.toString(); });
 
-    // Ручной таймаут (spawn сам по себе не гарантирует убийство зависшего процесса)
+    // Таймаут 3.5 минуты
     const timeoutMs = 210000;
     const timer = setTimeout(() => {
       try {
@@ -70,44 +113,52 @@ async function extractAudio(inputUrl) {
       } catch (_) {}
     }, timeoutMs);
 
-    const finish = (err, filePath) => {
+    const cleanup = () => {
       clearTimeout(timer);
-      if (err) return reject(err);
-      return resolve(filePath);
+      if (hasCookies && fs.existsSync(cookiesPath)) {
+        try { fs.unlinkSync(cookiesPath); } catch (_) {}
+      }
     };
 
     ytDlp.on('close', (code) => {
+      cleanup();
+
       if (code === 0) {
-        if (fs.existsSync(finalPath)) {
-          const stat = fs.statSync(finalPath);
+        // 🔍 УМНЫЙ ПОИСК ФАЙЛА
+        let foundPath = null;
+        if (fs.existsSync(expectedWavPath)) {
+            foundPath = expectedWavPath;
+        } else {
+            const candidates = fs.readdirSync(tempDir)
+                .filter(f => f.startsWith(`audio_${uniqueId}`) && f.endsWith('.wav'));
+            if (candidates.length > 0) {
+                foundPath = path.join(tempDir, candidates[0]);
+                console.log(`[Downloader] ⚠️ Exact path missing, found candidate: ${foundPath}`);
+            }
+        }
+
+        if (foundPath && fs.existsSync(foundPath)) {
+          const stat = fs.statSync(foundPath);
           if (stat.size < 1024) {
-            return finish(new Error(
-              `yt-dlp produced empty/corrupt file (${stat.size} bytes). stdout: ${stdout.slice(0, 300)} stderr: ${stderr.slice(0, 500)}`
-            ));
+             return reject(new Error(`yt-dlp produced empty file (${stat.size} bytes). Stderr: ${stderr.slice(0, 500)}`));
           }
           const dur = ((Date.now() - startedAt) / 1000).toFixed(2);
-          console.log(`[Downloader] ✅ Completed in ${dur}s: ${finalPath}`);
-          return finish(null, finalPath);
+          console.log(`[Downloader] ✅ Completed in ${dur}s: ${foundPath}`);
+          return resolve(foundPath);
         }
-        return finish(new Error(
-          `yt-dlp finished but file missing. stdout: ${stdout.slice(0, 300)} stderr: ${stderr.slice(0, 800)}`
-        ));
+        return reject(new Error(`yt-dlp finished but WAV missing. Stderr: ${stderr.slice(0, 800)} Stdout: ${stdout.slice(0, 300)}`));
       }
-      return finish(new Error(
-        `yt-dlp failed (code ${code}). stdout: ${stdout.slice(0, 300)} stderr: ${stderr.slice(0, 1200)}`
-      ));
+      // ✅ Теперь возвращаем и Stdout, и Stderr
+      return reject(new Error(`yt-dlp failed (code ${code}). Stderr: ${stderr.slice(0, 1000)} Stdout: ${stdout.slice(0, 300)}`));
     });
 
     ytDlp.on('error', (err) => {
-      clearTimeout(timer);
+      cleanup();
       reject(new Error(`Failed to spawn yt-dlp: ${err.message}`));
     });
   });
 }
 
-/**
- * Пока заглушка VAD.
- */
 async function performVAD(audioPath) {
   console.log(`[VAD] ⚡ Fast Mode placeholder: ${audioPath}`);
   return [{ start: 0, end: -1 }];
