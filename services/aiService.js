@@ -118,7 +118,7 @@ async function searchTavily(query) {
         if (cached) return JSON.parse(cached);
     }
 
-    const res = await axios.post("[https://api.tavily.com/search](https://api.tavily.com/search)", {
+    const res = await axios.post("'https://api.tavily.com/search'", {
       api_key: process.env.TAVILY_API_KEY,
       query: safeQuery,
       search_depth: "basic",

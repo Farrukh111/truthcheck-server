@@ -2,12 +2,18 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
+/**
+ * Создает папку temp, если её нет
+ */
 function ensureTempDir() {
   const dir = path.resolve(process.cwd(), 'temp');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
+/**
+ * Превращает ID видео в полную ссылку (если пришел просто ID)
+ */
 function normalizeYoutubeInput(input) {
   const s = String(input || '').trim();
   if (/^[a-zA-Z0-9_-]{11}$/.test(s)) {
@@ -16,7 +22,9 @@ function normalizeYoutubeInput(input) {
   return s;
 }
 
-// 🍪 УМНАЯ ЗАГРУЗКА КУКОВ (Base64 приоритетнее)
+/**
+ * Получает содержимое куков из ENV (Base64 или текст)
+ */
 function getCookiesContent() {
   if (process.env.YOUTUBE_COOKIES_B64) {
     try {
@@ -31,15 +39,19 @@ function getCookiesContent() {
   return null;
 }
 
+/**
+ * Главная функция скачивания
+ */
 async function extractAudio(inputUrl) {
   const url = normalizeYoutubeInput(inputUrl);
   console.log(`[Downloader] ⬇️ Processing: ${url}`);
 
   const startedAt = Date.now();
   const tempDir = ensureTempDir();
+  // Уникальное имя файла
   const uniqueId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   
-  // Мы используем шаблон, но yt-dlp сам подставит расширение wav после конвертации
+  // Шаблон вывода (yt-dlp добавит .wav сам)
   const outTemplate = path.join(tempDir, `audio_${uniqueId}.%(ext)s`);
   const expectedWavPath = path.join(tempDir, `audio_${uniqueId}.wav`);
   const cookiesPath = path.join(tempDir, `cookies_${uniqueId}.txt`);
@@ -52,52 +64,51 @@ async function extractAudio(inputUrl) {
     try {
       fs.writeFileSync(cookiesPath, cookiesContent, { encoding: 'utf8', mode: 0o600 });
       const stats = fs.statSync(cookiesPath);
-      const firstLine = cookiesContent.split('\n')[0] || '';
-      console.log(`[Cookies] ✅ Loaded. Size: ${stats.size} bytes. Header check: "${firstLine.substring(0, 50)}..."`);
+      console.log(`[Cookies] ✅ Loaded. Size: ${stats.size} bytes.`);
     } catch (e) {
       console.error(`[Cookies] ⚠️ Error writing cookies: ${e.message}`);
     }
   } else {
-    console.log(`[Cookies] ⚠️ No cookies found in ENV`);
+    console.log(`[Cookies] ⚠️ No cookies found in ENV (may fail on restricted videos)`);
   }
 
-  // Настройка времени (3 минуты)
-  const durationSec = 180;
-  const mm = Math.floor(durationSec / 60);
-  const ss = durationSec % 60;
-  const endTime = `00:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
-  const timeSection = `*00:00-${endTime}`;
+  // Ограничиваем длину (первые 3 минуты), чтобы не забить диск
+  const timeSection = `*00:00-03:00`;
 
   return new Promise((resolve, reject) => {
-    // 🔥 ИСПРАВЛЕННЫЕ АРГУМЕНТЫ (Omnivorous Mode)
+    // 🔥 ФИНАЛЬНЫЕ АРГУМЕНТЫ (AUDIO ONLY MODE)
     const args = [
-      '-f', 'bestvideo+bestaudio/best', // 🔥 ГЛАВНОЕ: Разрешаем скачивать что угодно
-      '-x',                             // Извлекаем аудио
-      '--audio-format', 'wav',          // Конвертируем в WAV
-      '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', // Формат для AI (16kHz mono)
-      '--download-sections', timeSection,
+      '-f', 'bestaudio/best',           // 1. Ищем лучшее аудио (игнорируем видео)
+      '--extract-audio',                // 2. Извлекаем звук
+      '--audio-format', 'wav',          // 3. Конвертируем в WAV
+      '--audio-quality', '0',           // 4. Лучшее качество
+      // 5. Пост-обработка FFmpeg: 16000 Hz, Моно (идеально для AI)
+      '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', 
+      
+      '--download-sections', timeSection, // Качаем только фрагмент
       '--force-overwrites',
       '--no-playlist',
       '--no-warnings',
       '--no-progress',
-      '--geo-bypass',
+      '--geo-bypass',                     // Обход гео-блоков
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
       '-o', outTemplate
     ];
 
+    // Добавляем куки, если есть
     if (hasCookies && fs.existsSync(cookiesPath)) {
       args.push('--cookies', cookiesPath);
     }
 
+    // Добавляем прокси, если есть
     if (process.env.PROXY_URL) {
       args.push('--proxy', process.env.PROXY_URL);
     }
 
-    // 🔥 Ссылка ВСЕГДА последняя
+    // URL всегда последний
     args.push(url);
 
-    // Логируем команду для отладки (скрывая куки)
-    // console.log('[Downloader] Command args:', args.filter(a => !a.includes('cookies')));
-
+    // Запуск процесса
     const ytDlp = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let stderr = '';
@@ -106,7 +117,7 @@ async function extractAudio(inputUrl) {
     ytDlp.stdout.on('data', (d) => { stdout += d.toString(); });
     ytDlp.stderr.on('data', (d) => { stderr += d.toString(); });
 
-    // Таймаут 3.5 минуты
+    // Таймаут 3.5 минуты (на всякий случай)
     const timeoutMs = 210000;
     const timer = setTimeout(() => {
       try {
@@ -115,6 +126,7 @@ async function extractAudio(inputUrl) {
       } catch (_) {}
     }, timeoutMs);
 
+    // Очистка после завершения
     const cleanup = () => {
       clearTimeout(timer);
       if (hasCookies && fs.existsSync(cookiesPath)) {
@@ -126,12 +138,12 @@ async function extractAudio(inputUrl) {
       cleanup();
 
       if (code === 0) {
-        // 🔍 УМНЫЙ ПОИСК ФАЙЛА
+        // Проверяем, создался ли файл
         let foundPath = null;
         if (fs.existsSync(expectedWavPath)) {
             foundPath = expectedWavPath;
         } else {
-            // Если имя файла немного отличается, ищем кандидата
+            // Иногда yt-dlp добавляет ID в имя файла, ищем похожий
             const candidates = fs.readdirSync(tempDir)
                 .filter(f => f.startsWith(`audio_${uniqueId}`) && f.endsWith('.wav'));
             if (candidates.length > 0) {
@@ -142,16 +154,18 @@ async function extractAudio(inputUrl) {
 
         if (foundPath && fs.existsSync(foundPath)) {
           const stat = fs.statSync(foundPath);
+          // Защита от пустых файлов
           if (stat.size < 1024) {
              return reject(new Error(`yt-dlp produced empty file (${stat.size} bytes). Stderr: ${stderr.slice(0, 500)}`));
           }
+          
           const dur = ((Date.now() - startedAt) / 1000).toFixed(2);
           console.log(`[Downloader] ✅ Completed in ${dur}s: ${foundPath}`);
           return resolve(foundPath);
         }
-        return reject(new Error(`yt-dlp finished but WAV missing. Stderr: ${stderr.slice(0, 800)} Stdout: ${stdout.slice(0, 300)}`));
+        return reject(new Error(`yt-dlp finished but WAV missing. Stderr: ${stderr.slice(0, 800)}`));
       }
-      return reject(new Error(`yt-dlp failed (code ${code}). Stderr: ${stderr.slice(0, 1000)} Stdout: ${stdout.slice(0, 300)}`));
+      return reject(new Error(`yt-dlp failed (code ${code}). Stderr: ${stderr.slice(0, 1000)}`));
     });
 
     ytDlp.on('error', (err) => {
@@ -161,8 +175,12 @@ async function extractAudio(inputUrl) {
   });
 }
 
+/**
+ * Заглушка для VAD (чтобы не упасть по памяти на Python скрипте)
+ * Возвращает "весь файл" как полезный сегмент.
+ */
 async function performVAD(audioPath) {
-  console.log(`[VAD] ⚡ Fast Mode placeholder: ${audioPath}`);
+  console.log(`[VAD] ⚡ Passthrough Mode (Processing whole file): ${audioPath}`);
   return [{ start: 0, end: -1 }];
 }
 
