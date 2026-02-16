@@ -1,6 +1,7 @@
 const { Queue } = require('bullmq');
 const { redisOptions, connection } = require('../config/redis');
 
+
 let verificationQueue = null;
 
 // 🔥 ГЛАВНАЯ ЗАЩИТА: Создаем очередь ТОЛЬКО если есть подключение
