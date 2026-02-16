@@ -1,9 +1,9 @@
 FROM node:20-bookworm-slim
 
-# IPv4-first (лечит проблемы с сетью)
+# Настройка сети
 ENV NODE_OPTIONS=--dns-result-order=ipv4first
 
-# Установка системных зависимостей
+# Установка зависимостей (ffmpeg, python, yt-dlp)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     ffmpeg \
@@ -13,28 +13,23 @@ RUN apt-get update && apt-get install -y \
     python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Установка yt-dlp
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp
 
 WORKDIR /app
 
-# 1. Сначала зависимости (для кэширования)
+# Копируем package.json из корня
 COPY package*.json ./
 COPY prisma ./prisma/
 
-# 2. Установка модулей
 RUN npm install --omit=dev
 RUN npx prisma generate
 
-# 3. 🔥 ГЛАВНЫЙ ФИКС: ПРИНУДИТЕЛЬНО КОПИРУЕМ ПАПКУ SERVER
-COPY server ./server
-
-# 4. Копируем всё остальное (на случай конфигов в корне)
+# 🔥 КОПИРУЕМ ВСЁ ИЗ КОРНЯ (теперь это сработает, т.к. файлы лежат тут)
 COPY . .
 
-# 5. Создаем папку temp
+# Создаем папку temp
 RUN mkdir -p temp && chmod 777 temp
 
-# Команда по умолчанию
-CMD ["node", "server/worker_entry.js"]
+# ✅ ЗАПУСКАЕМ ИЗ КОРНЯ (без server/)
+CMD ["node", "worker_entry.js"]
