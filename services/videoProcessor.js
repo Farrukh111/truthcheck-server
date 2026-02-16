@@ -39,6 +39,7 @@ async function extractAudio(inputUrl) {
   const tempDir = ensureTempDir();
   const uniqueId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   
+  // Мы используем шаблон, но yt-dlp сам подставит расширение wav после конвертации
   const outTemplate = path.join(tempDir, `audio_${uniqueId}.%(ext)s`);
   const expectedWavPath = path.join(tempDir, `audio_${uniqueId}.wav`);
   const cookiesPath = path.join(tempDir, `cookies_${uniqueId}.txt`);
@@ -50,12 +51,9 @@ async function extractAudio(inputUrl) {
   if (hasCookies) {
     try {
       fs.writeFileSync(cookiesPath, cookiesContent, { encoding: 'utf8', mode: 0o600 });
-      
-      // 🔍 ДИАГНОСТИКА: Проверяем размер и заголовок файла
       const stats = fs.statSync(cookiesPath);
       const firstLine = cookiesContent.split('\n')[0] || '';
       console.log(`[Cookies] ✅ Loaded. Size: ${stats.size} bytes. Header check: "${firstLine.substring(0, 50)}..."`);
-      
     } catch (e) {
       console.error(`[Cookies] ⚠️ Error writing cookies: ${e.message}`);
     }
@@ -71,17 +69,18 @@ async function extractAudio(inputUrl) {
   const timeSection = `*00:00-${endTime}`;
 
   return new Promise((resolve, reject) => {
-    // 🔥 Опции ПЕРЕД ссылкой
+    // 🔥 ИСПРАВЛЕННЫЕ АРГУМЕНТЫ (Omnivorous Mode)
     const args = [
-      '-x',
-      '--audio-format', 'wav',
-      '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000',
+      '-f', 'bestvideo+bestaudio/best', // 🔥 ГЛАВНОЕ: Разрешаем скачивать что угодно
+      '-x',                             // Извлекаем аудио
+      '--audio-format', 'wav',          // Конвертируем в WAV
+      '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', // Формат для AI (16kHz mono)
       '--download-sections', timeSection,
       '--force-overwrites',
       '--no-playlist',
       '--no-warnings',
       '--no-progress',
-      '--geo-bypass', // ✅ Добавлено: обход гео-блоков
+      '--geo-bypass',
       '-o', outTemplate
     ];
 
@@ -96,10 +95,13 @@ async function extractAudio(inputUrl) {
     // 🔥 Ссылка ВСЕГДА последняя
     args.push(url);
 
+    // Логируем команду для отладки (скрывая куки)
+    // console.log('[Downloader] Command args:', args.filter(a => !a.includes('cookies')));
+
     const ytDlp = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let stderr = '';
-    let stdout = ''; // ✅ Добавлено: собираем stdout для диагностики
+    let stdout = '';
 
     ytDlp.stdout.on('data', (d) => { stdout += d.toString(); });
     ytDlp.stderr.on('data', (d) => { stderr += d.toString(); });
@@ -129,6 +131,7 @@ async function extractAudio(inputUrl) {
         if (fs.existsSync(expectedWavPath)) {
             foundPath = expectedWavPath;
         } else {
+            // Если имя файла немного отличается, ищем кандидата
             const candidates = fs.readdirSync(tempDir)
                 .filter(f => f.startsWith(`audio_${uniqueId}`) && f.endsWith('.wav'));
             if (candidates.length > 0) {
@@ -148,7 +151,6 @@ async function extractAudio(inputUrl) {
         }
         return reject(new Error(`yt-dlp finished but WAV missing. Stderr: ${stderr.slice(0, 800)} Stdout: ${stdout.slice(0, 300)}`));
       }
-      // ✅ Теперь возвращаем и Stdout, и Stderr
       return reject(new Error(`yt-dlp failed (code ${code}). Stderr: ${stderr.slice(0, 1000)} Stdout: ${stdout.slice(0, 300)}`));
     });
 
