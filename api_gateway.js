@@ -105,8 +105,13 @@ app.post('/api/v1/verify', async (req, res) => {
 
   if (!finalContent) return res.status(400).json({ error: 'Content/videoUrl is required' });
 
-  // Проверка безопасности
-  if (await isDangerousUrl(finalContent)) {
+    const isUrlPayload = (() => {
+    if (type === 'video') return true;
+    try { new URL(finalContent); return true; } catch { return false; }
+  })();
+
+  // Проверка безопасности только для URL-контента
+  if (isUrlPayload && await isDangerousUrl(finalContent)) {
     console.warn(`[Security] Blocked SSRF: ${finalContent}`);
     return res.status(403).json({ error: 'Invalid or restricted URL' });
   }

@@ -313,24 +313,37 @@ async function processVerification(job) {
 
     const taskDuration = Date.now() - startedAt;
 
-    const savedCheck = await prisma.check.create({
-      data: {
-        userId: 'anon',
-        type: typeNormalized,
-        content: contentNormalized,
-        verdict: result.verdict,
-        confidence: Number(result.confidence || 0),
-        summary: String(result.summary || ''),
-        aiModel: (result.ai_details && result.ai_details.model) ? String(result.ai_details.model) : 'Hybrid',
-        durationMs: taskDuration,
-        keyClaim: result.key_claim ? String(result.key_claim) : null,
-        sources: JSON.stringify(Array.isArray(result.sources) ? result.sources : []),
-        pipelineVersion: PIPELINE_VERSION,
-        fingerprint: fingerprint,
+    let savedCheck;
+    try {
+      savedCheck = await prisma.check.create({
+        data: {
+          userId: 'anon',
+          type: typeNormalized,
+          content: contentNormalized,
+          verdict: result.verdict,
+          confidence: Number(result.confidence || 0),
+          summary: String(result.summary || ''),
+          aiModel: (result.ai_details && result.ai_details.model) ? String(result.ai_details.model) : 'Hybrid',
+          durationMs: taskDuration,
+          keyClaim: result.key_claim ? String(result.key_claim) : null,
+          sources: JSON.stringify(Array.isArray(result.sources) ? result.sources : []),
+          pipelineVersion: PIPELINE_VERSION,
+          fingerprint: fingerprint,
+        }
+      });
+    } catch (e) {
+      // На случай гонки при уникальном индексе fingerprint+pipelineVersion
+      if (e?.code === 'P2002') {
+        savedCheck = await prisma.check.findFirst({
+          where: { fingerprint, pipelineVersion: PIPELINE_VERSION },
+          orderBy: { createdAt: 'desc' }
+        });
+      } else {
+        throw e;
       }
-    });
+    }
 
-    result.dbId = savedCheck.id;
+    result.dbId = savedCheck?.id || null;
     result.fingerprint = fingerprint;
 
     // 8) Cache result in Redis
@@ -338,7 +351,7 @@ async function processVerification(job) {
       await redis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
     }
 
-    if (pushToken) await sendPush(pushToken, result.verdict, savedCheck.id);
+    if (pushToken) await sendPush(pushToken, result.verdict, savedCheck?.id || null);
 
     await job.updateProgress(100);
     console.log(`[Worker] ✅ Job ${job.id} Done in ${(taskDuration / 1000).toFixed(2)}s. Verdict: ${result.verdict}`);

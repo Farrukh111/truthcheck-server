@@ -62,6 +62,19 @@ function smartTrim(text, maxLength) {
     ? rawSlice.slice(0, lastSentenceEnd + 1) 
     : rawSlice;
 }
+function normalizeClaimText(text) {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/[“”]/g, '"')
+    .trim();
+}
+
+function hasLikelyFactualSignal(text) {
+  const s = String(text || '').toLowerCase();
+  if (s.length < 20) return false;
+  return /\d|%|в\s+\d{4}|исслед|study|данн|статист|according|report|факт|доказ/.test(s);
+}
 
 // --- 🛡️ 3. SUPER PARSER (Версия из аудита) ---
 function extractJSONSafe(text) {
@@ -135,7 +148,7 @@ async function searchTavily(query) {
       .map(r => ({ 
         title: r.title, 
         url: r.url, 
-        content: r.content.slice(0, 350) 
+        content: r.content.slice(0, 220) 
       }));
 
     // 🔥 FIX: Пишем в кэш только если Redis подключен
@@ -197,12 +210,23 @@ async function analyzeContentType(text) {
 
 // --- 7. FACT CHECKER (С АТРИБУЦИЕЙ ИСТОЧНИКОВ) ---
 async function verifyClaim(text) {
-  console.log(`[AI] Checking: "${text.substring(0, 40)}..."`);
+    const normalizedText = normalizeClaimText(text);
+  console.log(`[AI] Checking: "${normalizedText.substring(0, 40)}..."`);
+
+  if (!hasLikelyFactualSignal(normalizedText)) {
+    return {
+      verdict: 'UNCERTAIN',
+      summary: 'Недостаточно фактологических сигналов для надежной проверки.',
+      confidence: 0.35,
+      breakdown: [],
+      sources: []
+    };
+  }
   let searchContext = ""; // Строка для промпта
   let sourcesList = []; // Массив для JSON результата
 
   if (process.env.TAVILY_API_KEY) {
-    const search = await searchTavily(text);
+    const search = await searchTavily(normalizedtext);
     if (search) {
       sourcesList = search; // Сохраняем оригинальные объекты
       
@@ -212,11 +236,25 @@ async function verifyClaim(text) {
       ).join("\n\n");
     }
   }
+    const sourceDigest = crypto
+    .createHash('md5')
+    .update(JSON.stringify(sourcesList.map(s => ({ url: s.url, title: s.title }))))
+    .digest('hex');
+  const verifyCacheKey = `verify:v2:${crypto.createHash('md5').update(`${normalizedText}|${sourceDigest}`).digest('hex')}`;
+
+  if (redis) {
+    const cached = await redis.get(verifyCacheKey);
+    if (cached) {
+      try {
+        return JSON.parse(cached);
+      } catch (_) {}
+    }
+  }
 
   const deepSeekPrompt = `
     ROLE: Professional Fact-Checker AI.
     LANGUAGE: RUSSIAN.
-    INPUT: "${text}"
+    INPUT: "${smartTrim(normalizedText, 700)}"
     EVIDENCE: 
     ${searchContext || "No external evidence found."}
 
@@ -255,7 +293,7 @@ async function verifyClaim(text) {
       const json = extractJSONSafe(rawContent);
       
       if (json) {
-          return {
+          const response = {
               verdict: (json.verdict || "UNCERTAIN").toUpperCase(),
               summary: (json.summary || "Анализ завершен.").toString().substring(0, 200),
               confidence: Number(json.confidence) || 0,
@@ -272,6 +310,11 @@ async function verifyClaim(text) {
               
               sources: sourcesList // Возвращаем полный список ссылок
           };
+
+          if (redis) {
+            await redis.set(verifyCacheKey, JSON.stringify(response), 'EX', 21600);
+          }
+          return response;
       }
       
       throw new Error("Failed to parse JSON");
