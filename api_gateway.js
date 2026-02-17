@@ -31,7 +31,22 @@ const statusLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+async function ensureQueueReady(timeoutMs = 1500) {
+  if (!verificationQueue) return false;
 
+  try {
+    await Promise.race([
+      verificationQueue.waitUntilReady(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Queue readiness timeout')), timeoutMs)
+      )
+    ]);
+    return true;
+  } catch (error) {
+    console.error('[API] Queue is not ready:', error.message);
+    return false;
+  }
+}
 // 🔥🔥🔥 DEV MODE: ОТКЛЮЧЕНИЕ АУТЕНТИФИКАЦИИ 🔥🔥🔥
 // Этот блок позволяет тестировать API без токенов.
 // ПЕРЕД ПРОДАКШЕНОМ ЭТОТ БЛОК НУЖНО УДАЛИТЬ!
@@ -117,7 +132,7 @@ app.post('/api/v1/verify', async (req, res) => {
   }
 
   try {
-    if (!verificationQueue) {
+    if (!(await ensureQueueReady())) {
       console.error("[API] Queue not initialized (Redis missing?)");
       return res.status(503).json({ error: 'Service unavailable (Queue offline)' });
     }
@@ -151,7 +166,7 @@ app.post('/api/v1/verify', async (req, res) => {
 // 2. Статус (БЕЗ Auth)
 app.get('/api/v1/status/:jobId', statusLimiter, async (req, res) => {
   try {
-    if (!verificationQueue) return res.status(503).json({ error: 'Queue offline' });
+    if (!(await ensureQueueReady())) return res.status(503).json({ error: 'Queue offline' });
 
     const job = await verificationQueue.getJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
@@ -181,6 +196,11 @@ app.get('/api/v1/events/:jobId', async (req, res) => {
   const sendData = (data) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
+  if (!(await ensureQueueReady())) {
+    sendData({ status: 'failed', error: 'Queue offline' });
+    return res.end();
+  }
+
 
   // Проверка статуса (если уже готово — сразу отдать)
   const checkImmediate = async () => {
