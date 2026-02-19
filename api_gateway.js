@@ -280,5 +280,5 @@ const PORT = process.env.PORT || 10000;
 // Оставляем только один вызов и обязательно указываем '0.0.0.0'
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 API Gateway running on port ${PORT}`);
-  console.log(`🔗 Accessible at http://0.0.0.0:${PORT}`);
+  
 });
