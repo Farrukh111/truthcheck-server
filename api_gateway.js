@@ -14,6 +14,7 @@ const { URL } = require('url');
 
 const prisma = new PrismaClient();
 const app = express();
+app.get('/healthz', (req, res) => res.status(200).send('OK')); // Для Render
 app.set('trust proxy', 1);
 app.use(express.json());
 app.use(cors());
@@ -275,4 +276,9 @@ app.post('/api/v1/auth/login', (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 API Gateway running on ${PORT}`));
+
+// Оставляем только один вызов и обязательно указываем '0.0.0.0'
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 API Gateway running on port ${PORT}`);
+  console.log(`🔗 Accessible at http://0.0.0.0:${PORT}`);
+});
