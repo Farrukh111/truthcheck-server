@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
     python3-minimal \
+    python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Скачиваем yt-dlp напрямую
