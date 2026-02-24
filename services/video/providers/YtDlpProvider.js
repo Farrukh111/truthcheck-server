@@ -1,16 +1,17 @@
+// server/services/video/providers/YtDlpProvider.js
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
 class YtDlpProvider {
   constructor() {
-    // Путь к cookies.txt (поднимаемся на 4 уровня вверх: video -> providers -> services -> server -> root)
+    // cookies.txt лежит в корне репо (поднимаемся на 4 уровня: video -> providers -> services -> server -> root)
     this.cookiesPath = path.resolve(__dirname, '../../../../cookies.txt');
   }
 
   /**
    * Общие аргументы для стабильной работы с YouTube на облаках.
-   * (моб. клиент + IPv4 + базовые ретраи + no-playlist)
+   * (моб. клиент + iOS UA + IPv4 + ретраи + no-playlist)
    */
   getCommonYouTubeArgs() {
     return [
@@ -19,6 +20,10 @@ class YtDlpProvider {
       // ✅ Главный обход "Requested format is not available"
       '--extractor-args',
       'youtube:player_client=ios,mweb;player_skip=webpage',
+
+      // ✅ Консистентный iOS User-Agent (важно вместе с ios,mweb)
+      '--user-agent',
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
 
       // ✅ Часто помогает на облачных хостингах
       '--force-ipv4',
@@ -37,9 +42,52 @@ class YtDlpProvider {
    * Добавляет cookies/proxy, если они доступны.
    */
   applyAuthAndProxy(args) {
-    if (fs.existsSync(this.cookiesPath)) args.push('--cookies', this.cookiesPath);
-    if (process.env.PROXY_URL) args.push('--proxy', process.env.PROXY_URL);
+    if (fs.existsSync(this.cookiesPath)) {
+      args.push('--cookies', this.cookiesPath);
+    }
+    if (process.env.PROXY_URL) {
+      args.push('--proxy', process.env.PROXY_URL);
+    }
     return args;
+  }
+
+  /**
+   * Универсальный запуск yt-dlp с нормальным таймаутом (spawn не имеет "timeout" как exec).
+   */
+  runYtDlp(args, timeoutMs = 120000) {
+    const finalArgs = this.applyAuthAndProxy([...args]);
+
+    return new Promise((resolve, reject) => {
+      const proc = spawn('yt-dlp', finalArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      const killTimer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch (_) {}
+        reject(new Error(`yt-dlp timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      proc.stdout.on('data', (d) => { stdout += d.toString(); });
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+      proc.on('error', (err) => {
+        clearTimeout(killTimer);
+        reject(new Error(`Failed to start yt-dlp: ${err.message}`));
+      });
+
+      proc.on('close', (code) => {
+        clearTimeout(killTimer);
+
+        if (code === 0) {
+          resolve({ stdout, stderr });
+        } else {
+          reject(new Error(`yt-dlp failed (code ${code}). stderr: ${stderr}`));
+        }
+      });
+    });
   }
 
   /**
@@ -48,49 +96,28 @@ class YtDlpProvider {
    */
   async getVideoDuration(url) {
     const args = [
-      url,
-      '--dump-json',     // Только JSON метаданные
-      '--skip-download', // Самое важное: не качаем видео
+      '--dump-json',
+      '--skip-download',
       ...this.getCommonYouTubeArgs(),
+      url,
     ];
 
-    this.applyAuthAndProxy(args);
-
-    return new Promise((resolve, reject) => {
-      // Таймаут 30 секунд на получение инфы
-      const proc = spawn('yt-dlp', args, { timeout: 30000 });
-      let output = '';
-      let stderr = '';
-
-      proc.stdout.on('data', (d) => { output += d.toString(); });
-      proc.stderr.on('data', (d) => { stderr += d.toString(); });
-
-      proc.on('close', (code) => {
-        if (code === 0) {
-          try {
-            const json = JSON.parse(output);
-
-            if (!json.duration || typeof json.duration !== 'number') {
-              return reject(new Error('VIDEO_DURATION_UNKNOWN'));
-            }
-            resolve(json.duration);
-          } catch (e) {
-            reject(new Error(`Failed to parse video metadata. stderr: ${stderr}`));
-          }
-        } else {
-          console.error(`[YtDlp Meta Error]: ${stderr}`);
-          reject(new Error(`Failed to get video duration. code=${code}. stderr: ${stderr}`));
-        }
-      });
-    });
+    try {
+      const { stdout } = await this.runYtDlp(args, 30000);
+      const data = JSON.parse(stdout);
+      return typeof data.duration === 'number' ? data.duration : 0;
+    } catch (err) {
+      console.error('[YtDlp] Error getting duration:', err.message);
+      return 0;
+    }
   }
 
   /**
-   * Скачивает аудио (WAV 16kHz).
-   * Строго ограничивает длину скачивания.
+   * Скачивает аудио (WAV 16kHz) кусочком с начала.
+   * duration — сколько секунд качать (по умолчанию 180).
+   * Есть fallback: если bestaudio не доступен, пробуем best.
    */
   async downloadAudioSegment(url, outputId, duration = 180) {
-    // Путь к temp (поднимаемся на 4 уровня вверх)
     const outputPath = path.resolve(__dirname, '../../../../temp', `${outputId}.wav`);
 
     // Создаем папку temp, если её нет
@@ -103,45 +130,53 @@ class YtDlpProvider {
     const endTime = `00:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
     const timeSection = `*00:00-${endTime}`;
 
-    const args = [
-      url,
-
-      // ✅ Универсальный формат (аудио): меньше шансов получить "Requested format..."
-      '-f', 'ba/best',
+    const baseArgs = [
+      // Качаем только кусок
+      '--download-sections', timeSection,
+      '--force-overwrites',
 
       // Извлечь аудио
       '-x',
       '--audio-format', 'wav',
       '--postprocessor-args', 'ffmpeg:-ar 16000 -ac 1',
 
-      // Качаем только кусок
-      '--download-sections', timeSection,
-      '--force-overwrites',
-
+      // Общие аргументы
       ...this.getCommonYouTubeArgs(),
 
       // Путь вывода
       '-o', outputPath,
+
+      // URL в конце — так стабильнее
+      url,
     ];
 
-    this.applyAuthAndProxy(args);
+    // Попытка 1: bestaudio/best
+    try {
+      console.log('[YtDlp] Attempting primary download (bestaudio)...');
+      await this.runYtDlp(['-f', 'bestaudio/best', ...baseArgs], 210000);
 
-    return new Promise((resolve, reject) => {
-      // Таймаут 3.5 минуты (на случай медленного прокси)
-      const proc = spawn('yt-dlp', args, { timeout: 210000 });
-      let stderr = '';
+      if (!fs.existsSync(outputPath)) {
+        throw new Error('Output file missing after yt-dlp success');
+      }
 
-      proc.stderr.on('data', d => { stderr += d.toString(); });
+      return outputPath;
+    } catch (err) {
+      console.warn('[YtDlp] Primary format failed, trying fallback (best)...', err.message);
+    }
 
-      proc.on('close', (code) => {
-        if (code === 0 && fs.existsSync(outputPath)) {
-          resolve(outputPath);
-        } else {
-          console.error(`[YtDlp Download Error]: ${stderr}`);
-          reject(new Error(`yt-dlp failed with code ${code}. stderr: ${stderr}`));
-        }
-      });
-    });
+    // Попытка 2: best
+    try {
+      await this.runYtDlp(['-f', 'best', ...baseArgs], 210000);
+
+      if (!fs.existsSync(outputPath)) {
+        throw new Error('Output file missing after yt-dlp success (fallback)');
+      }
+
+      return outputPath;
+    } catch (fallbackErr) {
+      console.error('[YtDlp] Fallback download failed:', fallbackErr.message);
+      throw new Error(`All download attempts failed: ${fallbackErr.message}`);
+    }
   }
 }
 
