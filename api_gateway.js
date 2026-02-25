@@ -14,7 +14,7 @@ const { URL } = require('url');
 
 const prisma = new PrismaClient();
 const app = express();
-app.get('/healthz', (req, res) => res.status(200).send('OK')); // Для Render
+
 app.set('trust proxy', 1);
 app.use(express.json());
 app.use(cors());
@@ -152,8 +152,8 @@ app.post('/api/v1/verify', async (req, res) => {
       pushToken
     }, {
       attempts: 1,
-      removeOnComplete: 100,
-      removeOnFail: 200
+      removeOnComplete: true,
+      removeOnFail: { age: 3600 }
     });
 
     console.log(`[API] Job ${job.id} queued for ${finalContent}`);
@@ -260,16 +260,26 @@ app.get('/healthz', (req, res) => {
   res.status(200).send('OK');
 });
 
-// Твой расширенный health (без verificationQueue.client.ping)
+// Глубокая проверка для ручного мониторинга
 app.get('/health', async (req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ status: 'ok', uptime: process.uptime() });
-  } catch (e) {
-    res.status(503).json({ status: 'error', reason: e.message });
-  }
-});
+    const redisClient = await verificationQueue.client;
+    const redisStatus = await redisClient.ping();
 
+    res.json({
+      status: 'healthy',
+      database: 'connected',
+      redis: redisStatus === 'PONG' ? 'connected' : 'error'
+    });
+  } catch (error) {
+    console.error('[Health] Check failed:', error);
+    res.status(500).json({
+      status: 'unhealthy',
+      error: error.message
+    });
+  } // <-- ДОБАВЛЕНО
+});
 // 5. Тестовый вход (Mock Login для совместимости)
 app.post('/api/v1/auth/login', (req, res) => {
   res.json({ token: 'mock-token-for-benchmark', user: { id: 1, email: 'dev@test' } });

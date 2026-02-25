@@ -131,7 +131,7 @@ async function searchTavily(query) {
         if (cached) return JSON.parse(cached);
     }
 
-    const res = await axios.post("'https://api.tavily.com/search'", {
+    const res = await axios.post("https://api.tavily.com/search", {
       api_key: process.env.TAVILY_API_KEY,
       query: safeQuery,
       search_depth: "basic",
@@ -226,7 +226,7 @@ async function verifyClaim(text) {
   let sourcesList = []; // Массив для JSON результата
 
   if (process.env.TAVILY_API_KEY) {
-    const search = await searchTavily(normalizedtext);
+    const search = await searchTavily(normalizedText);
     if (search) {
       sourcesList = search; // Сохраняем оригинальные объекты
       

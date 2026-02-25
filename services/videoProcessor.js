@@ -38,6 +38,16 @@ function getCookiesContent() {
   }
   return null;
 }
+function validateCookies(content) {
+  const trimmed = String(content).trim();
+  if (!trimmed.startsWith('# Netscape HTTP Cookie File')) {
+    console.error('[Cookies] ❌ Ошибка формата: файл должен начинаться с "# Netscape HTTP Cookie File"');
+    return false;
+  }
+  return true;
+}
+
+
 
 /**
  * Главная функция скачивания
@@ -61,12 +71,16 @@ async function extractAudio(inputUrl) {
   const hasCookies = !!cookiesContent;
 
   if (hasCookies) {
-    try {
-      fs.writeFileSync(cookiesPath, cookiesContent, { encoding: 'utf8', mode: 0o600 });
-      const stats = fs.statSync(cookiesPath);
-      console.log(`[Cookies] ✅ Loaded. Size: ${stats.size} bytes.`);
-    } catch (e) {
-      console.error(`[Cookies] ⚠️ Error writing cookies: ${e.message}`);
+    if (validateCookies(cookiesContent)) {
+      try {
+        fs.writeFileSync(cookiesPath, cookiesContent, { encoding: 'utf8', mode: 0o600 });
+        const stats = fs.statSync(cookiesPath);
+        console.log(`[Cookies] ✅ Успешно сохранены. Размер: ${stats.size} байт.`);
+      } catch (e) {
+        console.error(`[Cookies] ⚠️ Ошибка записи: ${e.message}`);
+      }
+    } else {
+      console.warn('[Cookies] ⚠️ Куки проигнорированы из-за неверного формата. Запрос пойдет как анонимный.');
     }
   } else {
     console.log(`[Cookies] ⚠️ No cookies found in ENV (may fail on restricted videos)`);
