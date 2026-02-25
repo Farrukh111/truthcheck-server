@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
 # Устанавливаем yt-dlp напрямую из PyPI (всегда свежий релиз)
-RUN python3 -m pip install --no-cache-dir -U yt-dlp
+RUN python3 -m pip install --no-cache-dir -U yt-dlp --break-system-packages
 # 3. Копируем файлы зависимостей Node.js
 COPY package*.json ./
 RUN npm ci --omit=dev --ignore-scripts
