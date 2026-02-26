@@ -98,7 +98,10 @@ async function extractAudio(inputUrl) {
       '--audio-quality', '0',           // 4. Лучшее качество
       // 5. Пост-обработка FFmpeg: 16000 Hz, Моно (идеально для AI)
       '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', 
-      
+      '--js-runtimes', 'node',
+      '--extractor-args', 
+      'youtube:player_client=ios,mweb;player_skip=webpage',
+      '--no-check-certificate',
       '--download-sections', timeSection, // Качаем только фрагмент
       '--force-overwrites',
       '--no-playlist',
