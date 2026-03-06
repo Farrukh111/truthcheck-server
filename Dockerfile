@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir -U \
     yt-dlp-getpot-jsi
 
 # Global PO token provider server
-RUN npm install -g bgutil-ytdlp-pot-provider
+RUN npm install -g https://github.com/pukkandan/-bgutil-ytdlp-pot-provider
 
 
 
