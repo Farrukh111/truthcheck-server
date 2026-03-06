@@ -53,16 +53,18 @@ function getStickyProxyUrl(baseProxy) {
   if (!baseProxy) return null;
 
   try {
-    const proxyUrl = new URL(baseProxy);
     const sessionId = Math.floor(Math.random() * 10000000);
-
-    if (proxyUrl.username) {
-      proxyUrl.username = `${decodeURIComponent(proxyUrl.username)}-session-${sessionId}`;
+    // Вместо сложного разбора URL, просто вставляем session-id после логина
+    // Ищем место, где заканчивается логин (перед двоеточием в пароле)
+    // Формат: http://user:pass@host:port -> http://user-session-123:pass@host:port
+    
+    if (baseProxy.includes('@') && !baseProxy.includes('-session-')) {
+      return baseProxy.replace(/:\/\/(.*?):/, (match, user) => `://${user}-session-${sessionId}:`);
     }
-
-    return proxyUrl.toString();
+    
+    return baseProxy;
   } catch (err) {
-    console.error(`[Proxy] ⚠️ Invalid PROXY_URL, using as-is: ${err.message}`);
+    console.error(`[Proxy] ⚠️ Ошибка формирования Sticky URL: ${err.message}`);
     return baseProxy;
   }
 }
