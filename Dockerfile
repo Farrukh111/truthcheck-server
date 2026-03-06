@@ -2,7 +2,7 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-# 1. Сначала устанавливаем ВСЕ системные зависимости, включая curl и git
+# 1. Системные зависимости (ffmpeg для звука, git для плагинов)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -13,28 +13,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Настраиваем Python venv
+# 2. Python окружение
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# 3. Устанавливаем yt-dlp компоненты
+# 3. Установка yt-dlp со всеми обходами
 RUN pip install --no-cache-dir -U \
     "yt-dlp[default,curl-cffi]" \
     yt-dlp-getpot-jsi
 
-# 4. Теперь curl ТОЧНО есть в системе, скачиваем провайдер токенов
-RUN curl -L https://github.com/pukkandan/-bgutil-ytdlp-pot-provider/archive/refs/heads/master.tar.gz -o pot-provider.tar.gz \
-    && npm install -g ./pot-provider.tar.gz \
-    && rm pot-provider.tar.gz
+# 4. Установка провайдера токенов (БЕЗ лишнего дефиса в названии)
+RUN npm install -g https://github.com/pukkandan/bgutil-ytdlp-pot-provider.git
 
-# 5. Копируем файлы проекта и устанавливаем зависимости Node.js
+# 5. Приложение
 COPY package*.json ./
 RUN npm ci --omit=dev --ignore-scripts
 COPY . .
 
-# 6. Prisma и права
+# 6. Prisma и папки
 RUN npx prisma generate
 RUN mkdir -p temp && chmod 777 temp
 
-# 7. Запуск
+# 7. Запуск двух процессов одновременно
 CMD ["sh", "-c", "bgutil-pot-server --port 4416 & node worker_entry.js"]
