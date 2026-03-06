@@ -2,16 +2,14 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-# 1. Установка зависимостей + openssh-client (чтобы npm не ругался на отсутствие ssh)
+# 1. Установка системных зависимостей
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
     ffmpeg \
-    git \
     curl \
     ca-certificates \
-    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Настраиваем Python venv
@@ -23,9 +21,9 @@ RUN pip install --no-cache-dir -U \
     "yt-dlp[default,curl-cffi]" \
     yt-dlp-getpot-jsi
 
-# 4. ФОРСИРУЕМ HTTPS для git и устанавливаем провайдер токенов
-RUN git config --global url."https://github.com/".insteadOf ssh://git@github.com/ \
-    && npm install -g git+https://github.com/pukkandan/bgutil-ytdlp-pot-provider.git
+# 4. Установка провайдера токенов через ТАРБОЛЛ (архив)
+# Мы используем прямую ссылку на мастер-ветку. Дефис перед bgutil ВАЖЕН.
+RUN npm install -g https://github.com/pukkandan/-bgutil-ytdlp-pot-provider/tarball/master
 
 # 5. Приложение
 COPY package*.json ./
@@ -36,5 +34,5 @@ COPY . .
 RUN npx prisma generate
 RUN mkdir -p temp && chmod 777 temp
 
-# 7. Запуск
+# 7. Запуск: провайдер токенов на фоне + основной воркер
 CMD ["sh", "-c", "bgutil-pot-server --port 4416 & node worker_entry.js"]
