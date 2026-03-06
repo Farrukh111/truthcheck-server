@@ -1,12 +1,25 @@
 FROM node:20-bookworm-slim
 
 WORKDIR /app
-# Устанавливаем python, pip и ffmpeg
+# System dependencies for Node worker + Python yt-dlp stack
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip ffmpeg curl \
+    python3 python3-pip python3-venv ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 # Устанавливаем yt-dlp напрямую из PyPI (всегда свежий релиз)
-RUN python3 -m pip install --no-cache-dir -U yt-dlp --break-system-packages
+# Python virtual environment for yt-dlp tooling
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# yt-dlp with curl_cffi impersonation support + PO token integration helper
+RUN pip install --no-cache-dir -U \
+    "yt-dlp[default,curl-cffi]" \
+    yt-dlp-getpot-jsi
+
+# Global PO token provider server
+RUN npm install -g bgutil-ytdlp-pot-provider
+
+
+
 # 3. Копируем файлы зависимостей Node.js
 COPY package*.json ./
 RUN npm ci --omit=dev --ignore-scripts
@@ -21,4 +34,4 @@ RUN npx prisma generate
 RUN mkdir -p temp && chmod 777 temp
 
 # Запуск
-CMD ["node", "worker_entry.js"]
+CMD ["sh", "-c", "bgutil-pot-server --port 4416 & node worker_entry.js"]

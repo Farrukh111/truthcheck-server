@@ -46,6 +46,26 @@ function validateCookies(content) {
   }
   return true;
 }
+/**
+ * Создает sticky-session proxy URL, чтобы IP не менялся во время загрузки.
+ */
+function getStickyProxyUrl(baseProxy) {
+  if (!baseProxy) return null;
+
+  try {
+    const proxyUrl = new URL(baseProxy);
+    const sessionId = Math.floor(Math.random() * 10000000);
+
+    if (proxyUrl.username) {
+      proxyUrl.username = `${decodeURIComponent(proxyUrl.username)}-session-${sessionId}`;
+    }
+
+    return proxyUrl.toString();
+  } catch (err) {
+    console.error(`[Proxy] ⚠️ Invalid PROXY_URL, using as-is: ${err.message}`);
+    return baseProxy;
+  }
+}
 
 
 
@@ -100,13 +120,14 @@ async function extractAudio(inputUrl) {
       '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', 
       '--js-runtimes', 'node',
       '--extractor-args', 
-      'youtube:player_client=ios,mweb;player_skip=webpage',
+      'youtube:player_client=default;player_skip=webpage,configs',
       '--no-check-certificate',
       '--download-sections', timeSection, // Качаем только фрагмент
       '--force-overwrites',
       '--no-playlist',
       '--no-warnings',
       '--no-progress',
+      '--force-ipv4',
       '--geo-bypass',                     // Обход гео-блоков
       '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
       '-o', outTemplate
@@ -119,7 +140,7 @@ async function extractAudio(inputUrl) {
 
     // Добавляем прокси, если есть
     if (process.env.PROXY_URL) {
-      args.push('--proxy', process.env.PROXY_URL);
+      args.push('--proxy', getStickyProxyUrl(process.env.PROXY_URL));
     }
 
     // URL всегда последний
